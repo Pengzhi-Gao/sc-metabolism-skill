@@ -1,0 +1,491 @@
+make_consistency_object <- function(seed = 21, n_genes = 60, n_cells = 50) {
+  set.seed(seed)
+  mat <- Matrix::rsparsematrix(n_genes, n_cells, density = 0.15)
+  mat@x <- abs(mat@x * 10)
+  rownames(mat) <- paste0("g", seq_len(nrow(mat)))
+  colnames(mat) <- paste0("c", seq_len(ncol(mat)))
+  obj <- Seurat::CreateSeuratObject(counts = mat)
+  obj <- NormalizeData(obj, verbose = FALSE)
+  obj <- FindVariableFeatures(obj, nfeatures = 40, verbose = FALSE)
+  obj <- ScaleData(obj, features = SeuratObject::VariableFeatures(obj), verbose = FALSE)
+  obj
+}
+
+test_that("RunPCA default output is identical to Seurat", {
+  obj <- make_consistency_object()
+  hvf <- SeuratObject::VariableFeatures(obj)
+
+  scop_pca <- RunPCA(
+    obj,
+    features = hvf,
+    npcs = 8,
+    reduction.name = "pca_scop",
+    seed.use = 42,
+    verbose = FALSE
+  )
+  seurat_pca <- seurat_reference_method(
+    "RunPCA",
+    "Seurat",
+    obj,
+    features = hvf,
+    npcs = 8,
+    reduction.name = "pca_seurat",
+    seed.use = 42,
+    verbose = FALSE
+  )
+
+  expect_identical(
+    SeuratObject::Embeddings(scop_pca[["pca_scop"]]),
+    SeuratObject::Embeddings(seurat_pca[["pca_seurat"]])
+  )
+  expect_identical(
+    SeuratObject::Loadings(scop_pca[["pca_scop"]]),
+    SeuratObject::Loadings(seurat_pca[["pca_seurat"]])
+  )
+  expect_identical(
+    scop_pca[["pca_scop"]]@stdev,
+    seurat_pca[["pca_seurat"]]@stdev
+  )
+})
+
+test_that("RunPCA cpp backend remains an explicit override", {
+  obj <- make_consistency_object()
+  hvf <- SeuratObject::VariableFeatures(obj)
+
+  scop_pca <- RunPCA(
+    obj,
+    features = hvf,
+    npcs = 8,
+    reduction.name = "pca_cpp",
+    seed.use = 42,
+    backend = "cpp",
+    verbose = FALSE
+  )
+  seurat_pca <- seurat_reference_method(
+    "RunPCA",
+    "Seurat",
+    obj,
+    features = hvf,
+    npcs = 8,
+    reduction.name = "pca_seurat",
+    seed.use = 42,
+    verbose = FALSE
+  )
+
+  cpp_embeddings <- SeuratObject::Embeddings(scop_pca[["pca_cpp"]])
+  seurat_embeddings <- SeuratObject::Embeddings(seurat_pca[["pca_seurat"]])
+  expect_equal(dim(cpp_embeddings), c(ncol(obj), 8L))
+  expect_true(all(is.finite(cpp_embeddings)))
+  expect_equal(
+    unname(abs(cpp_embeddings)),
+    unname(abs(seurat_embeddings)),
+    tolerance = 1e-3
+  )
+})
+
+test_that("RunPCA native auto gate covers shape and argument branches", {
+  gate <- get("pca_native_auto_supported", asNamespace("scop"))
+  x <- matrix(0, nrow = 100L, ncol = 800L)
+  expect_true(gate(x, npcs = 20L, extra_args = list()))
+  expect_false(gate(x[, seq_len(799L), drop = FALSE], 20L, list()))
+  expect_false(gate(x, 20L, list(tol = 1e-5)))
+  expect_false(gate(Matrix::Matrix(x, sparse = TRUE), 20L, list()))
+  expect_false(gate(matrix(0, nrow = 5001L, ncol = 1L), 20L, list()))
+  expect_false(gate(x, 0L, list()))
+})
+
+test_that("RunPCA native eigengap gate rejects unstable trailing PCs", {
+  acceptable <- get(
+    "pca_native_candidate_acceptable",
+    asNamespace("scop")
+  )
+  expect_true(acceptable(c(10, 8, 6, 5), npcs = 3L))
+  expect_true(acceptable(c(10, 8, 6, 5.99), npcs = 3L))
+  expect_false(acceptable(c(10, 8, 6, 5.999), npcs = 3L))
+  expect_false(acceptable(c(10, 8, NA_real_, 5), npcs = 3L))
+})
+
+test_that("RunPCA matrix method supplies Seurat's default assay contract", {
+  set.seed(20260830)
+  x <- matrix(stats::rnorm(30L * 20L), nrow = 30L)
+  rownames(x) <- paste0("g", seq_len(nrow(x)))
+  colnames(x) <- paste0("c", seq_len(ncol(x)))
+  result <- RunPCA(x, npcs = 5L, verbose = FALSE)
+  expect_s4_class(result, "DimReduc")
+  expect_identical(result@assay.used, "RNA")
+})
+
+test_that("RunPCA matrix fallback retains exact and reverse PCA branches", {
+  set.seed(20260905)
+  x <- matrix(stats::rnorm(40L * 30L), nrow = 40L)
+  rownames(x) <- paste0("g", seq_len(nrow(x)))
+  colnames(x) <- paste0("c", seq_len(ncol(x)))
+  for (args in list(
+    list(approx = FALSE),
+    list(rev.pca = TRUE, approx = FALSE),
+    list(weight.by.var = FALSE, approx = FALSE)
+  )) {
+    actual <- suppressWarnings(do.call(
+      RunPCA,
+      c(list(object = x, npcs = 5L, verbose = FALSE), args)
+    ))
+    expected <- suppressWarnings(do.call(
+      function(object, ...) seurat_reference_method("RunPCA", "default", object, ...),
+      c(list(object = x, npcs = 5L, verbose = FALSE), args)
+    ))
+    expect_equal(
+      SeuratObject::Embeddings(actual),
+      SeuratObject::Embeddings(expected),
+      tolerance = 1e-12
+    )
+    expect_equal(
+      SeuratObject::Loadings(actual),
+      SeuratObject::Loadings(expected),
+      tolerance = 1e-12
+    )
+  }
+
+  sparse <- methods::as(Matrix::Matrix(x, sparse = TRUE), "dgCMatrix")
+  # Older Seurat releases rejected sparse PCA; current releases support it.
+  # Follow the installed upstream contract, including every numerical output.
+  for (args in list(
+    list(),
+    list(weight.by.var = FALSE),
+    list(rev.pca = TRUE),
+    list(tol = 1e-7)
+  )) {
+    common <- c(
+      list(object = sparse, assay = "RNA", npcs = 5L, verbose = FALSE),
+      args
+    )
+    expected <- tryCatch(
+      do.call(get("RunPCA.default", asNamespace("Seurat")), common),
+      error = identity
+    )
+    actual <- tryCatch(do.call(RunPCA, common), error = identity)
+    if (inherits(expected, "error")) {
+      expect_s3_class(actual, "error")
+      if (inherits(actual, "error")) {
+        expect_identical(conditionMessage(actual), conditionMessage(expected))
+      }
+    } else {
+      expect_identical(actual, expected)
+      expect_identical(dim(SeuratObject::Embeddings(actual)), c(ncol(x), 5L))
+      expect_identical(dim(SeuratObject::Loadings(actual)), c(nrow(x), 5L))
+    }
+  }
+  expect_no_error(RunPCA(
+    sparse,
+    npcs = 5L,
+    backend = "cpp",
+    verbose = FALSE
+  ))
+})
+
+test_that("RunPCA auto fallback tracks Seurat's current matrix solver", {
+  set.seed(20261005)
+  x <- matrix(stats::rnorm(40L * 30L), nrow = 40L)
+  dimnames(x) <- list(paste0("g", seq_len(nrow(x))), paste0("c", seq_len(ncol(x))))
+  # The small shape must use the upstream fallback, whose default solver can
+  # change between Seurat releases. Extra solver arguments must also survive.
+  for (args in list(list(), list(weight.by.var = FALSE), list(tol = 1e-7))) {
+    common <- c(list(object = x, assay = "RNA", npcs = 5L, verbose = FALSE), args)
+    expected <- do.call(get("RunPCA.default", asNamespace("Seurat")), common)
+    expected_seed <- .Random.seed
+    actual <- do.call(RunPCA, common)
+    expect_identical(actual, expected)
+    expect_identical(.Random.seed, expected_seed)
+  }
+
+  # Assay5 provides feature and cell names separately from its internal layer.
+  unnamed <- unname(x)
+  expected <- seurat_reference_method("RunPCA", "default", x,
+    assay = "RNA", npcs = 5L, verbose = FALSE
+  )
+  actual <- RunPCA(unnamed,
+    assay = "RNA", npcs = 5L, feature.names = rownames(x),
+    cell.names = colnames(x), verbose = FALSE
+  )
+  expect_identical(actual, expected)
+})
+
+test_that("RunPCA auto fallback preserves upstream rank boundary handling", {
+  set.seed(20261008)
+  x <- matrix(stats::rnorm(20L * 8L), nrow = 20L)
+  dimnames(x) <- list(paste0("g", seq_len(nrow(x))), paste0("c", seq_len(ncol(x))))
+  for (npcs in c(ncol(x), ncol(x) + 5L, nrow(x) + 5L)) {
+    common <- list(object = x, assay = "RNA", npcs = npcs, verbose = FALSE)
+    expected <- tryCatch(
+      suppressWarnings(do.call(get("RunPCA.default", asNamespace("Seurat")), common)),
+      error = identity
+    )
+    actual <- tryCatch(suppressWarnings(do.call(RunPCA, common)), error = identity)
+    if (inherits(expected, "error")) {
+      expect_s3_class(actual, "error")
+      if (inherits(actual, "error")) {
+        expect_identical(conditionMessage(actual), conditionMessage(expected))
+      }
+    } else {
+      expect_identical(actual, expected)
+    }
+  }
+})
+
+test_that("RunPCA rejected native candidates return the exact Seurat fallback", {
+  set.seed(20261006)
+  x <- matrix(stats::rnorm(20L * 200L), nrow = 20L)
+  dimnames(x) <- list(paste0("g", seq_len(nrow(x))), paste0("c", seq_len(ncol(x))))
+  expected <- seurat_reference_method("RunPCA", "default", x,
+    assay = "RNA", npcs = 5L, verbose = FALSE
+  )
+  called <- 0L
+  testthat::local_mocked_bindings(
+    pca_backend_run = function(...) {
+      called <<- called + 1L
+      list(eigvals = rep(1, 6L))
+    },
+    .package = "scop"
+  )
+  actual <- RunPCA(x, assay = "RNA", npcs = 5L, verbose = FALSE)
+  expect_identical(called, 1L)
+  expect_identical(actual, expected)
+})
+
+test_that("RunPCA irlba remains an explicit solver override", {
+  set.seed(20261007)
+  x <- matrix(stats::rnorm(40L * 30L), nrow = 40L)
+  dimnames(x) <- list(paste0("g", seq_len(nrow(x))), paste0("c", seq_len(ncol(x))))
+  for (weighted in c(TRUE, FALSE)) {
+    set.seed(42)
+    expected <- irlba::irlba(t(x), nv = 5L)
+    actual <- RunPCA(x,
+      assay = "RNA", npcs = 5L, backend = "irlba",
+      weight.by.var = weighted, verbose = FALSE
+    )
+    embeddings <- if (weighted) expected$u %*% diag(expected$d) else expected$u
+    expect_identical(unname(SeuratObject::Embeddings(actual)), embeddings)
+    expect_identical(unname(SeuratObject::Loadings(actual)), expected$v)
+    expect_identical(actual@stdev, expected$d / sqrt(ncol(x) - 1L))
+  }
+})
+
+test_that("RunPCA native auto path preserves a separated PCA subspace", {
+  set.seed(20260830)
+  features <- 80L
+  cells <- 800L
+  latent <- 12L
+  x <- matrix(stats::rnorm(features * latent), nrow = features) %*%
+    matrix(stats::rnorm(latent * cells), nrow = latent)
+  x <- x + matrix(stats::rnorm(length(x), sd = 0.05), nrow = features)
+  x <- x - rowMeans(x)
+  rownames(x) <- paste0("g", seq_len(features))
+  colnames(x) <- paste0("c", seq_len(cells))
+  reference <- RunPCA(
+    x,
+    assay = "RNA",
+    npcs = 10L,
+    backend = "irlba",
+    seed.use = 42,
+    verbose = FALSE
+  )
+  candidate <- RunPCA(
+    x,
+    assay = "RNA",
+    npcs = 10L,
+    seed.use = 42,
+    verbose = FALSE
+  )
+  reference_embedding <- SeuratObject::Embeddings(reference)
+  candidate_embedding <- SeuratObject::Embeddings(candidate)
+  signs <- sign(colSums(reference_embedding * candidate_embedding))
+  signs[signs == 0] <- 1
+  candidate_embedding <- sweep(candidate_embedding, 2L, signs, `*`)
+  expect_lt(
+    sqrt(mean((candidate_embedding - reference_embedding)^2)),
+    1e-8
+  )
+  expect_equal(candidate@stdev, reference@stdev, tolerance = 1e-10)
+})
+
+test_that("FindNeighbors nn graph is identical to Seurat (self edges preserved)", {
+  obj <- make_consistency_object()
+  hvf <- SeuratObject::VariableFeatures(obj)
+  obj <- RunPCA(obj, features = hvf, npcs = 8, verbose = FALSE)
+
+  scop_nn <- FindNeighbors(
+    obj,
+    reduction = "pca",
+    dims = 1:8,
+    k.param = 10,
+    graph.name = c("nn_scop", "snn_scop"),
+    verbose = FALSE
+  )
+  seurat_nn <- seurat_reference_method(
+    "FindNeighbors",
+    "Seurat",
+    obj,
+    reduction = "pca",
+    dims = 1:8,
+    k.param = 10,
+    graph.name = c("nn_seurat", "snn_seurat"),
+    verbose = FALSE
+  )
+
+  expect_identical(
+    as.matrix(scop_nn@graphs[["nn_scop"]]),
+    as.matrix(seurat_nn@graphs[["nn_seurat"]])
+  )
+  expect_equal(
+    sum(Matrix::diag(scop_nn@graphs[["nn_scop"]])),
+    ncol(obj),
+    label = "nn graph keeps self edges like Seurat"
+  )
+})
+
+test_that("FindNeighbors SNN graph is identical to Seurat", {
+  obj <- make_consistency_object()
+  hvf <- SeuratObject::VariableFeatures(obj)
+  obj <- RunPCA(obj, features = hvf, npcs = 8, verbose = FALSE)
+
+  scop_nn <- FindNeighbors(
+    obj,
+    reduction = "pca",
+    dims = 1:8,
+    k.param = 10,
+    graph.name = c("nn_scop", "snn_scop"),
+    verbose = FALSE
+  )
+  seurat_nn <- seurat_reference_method(
+    "FindNeighbors",
+    "Seurat",
+    obj,
+    reduction = "pca",
+    dims = 1:8,
+    k.param = 10,
+    graph.name = c("nn_seurat", "snn_seurat"),
+    verbose = FALSE
+  )
+
+  expect_identical(
+    as.matrix(scop_nn@graphs[["snn_scop"]]),
+    as.matrix(seurat_nn@graphs[["snn_seurat"]])
+  )
+})
+
+test_that("VST on split Assay5 layers matches Seurat's layered reference", {
+  obj <- make_consistency_object()
+  obj[["RNA"]] <- split(
+    obj[["RNA"]],
+    f = rep(c("A", "B"), length.out = ncol(obj))
+  )
+  joined <- SeuratObject::JoinLayers(obj, assay = "RNA")
+
+  layered_hvf <- SeuratObject::VariableFeatures(
+    FindVariableFeatures(obj, selection.method = "vst", nfeatures = 40, verbose = FALSE)
+  )
+  seurat_layered_hvf <- SeuratObject::VariableFeatures(
+    seurat_reference_method(
+      "FindVariableFeatures",
+      "Seurat",
+      obj,
+      selection.method = "vst",
+      nfeatures = 40,
+      verbose = FALSE
+    )
+  )
+  joined_hvf <- SeuratObject::VariableFeatures(
+    FindVariableFeatures(joined, selection.method = "vst", nfeatures = 40, verbose = FALSE)
+  )
+
+  expect_identical(layered_hvf, seurat_layered_hvf)
+  expect_identical(
+    identical(layered_hvf, joined_hvf),
+    identical(seurat_layered_hvf, joined_hvf)
+  )
+})
+
+test_that("VST aligns Assay5 layers with partially overlapping features", {
+  set.seed(42)
+  counts_a <- Matrix::Matrix(
+    matrix(stats::rpois(80 * 30, lambda = 2), nrow = 80),
+    sparse = TRUE,
+    dimnames = list(paste0("g", 1:80), paste0("a", 1:30))
+  )
+  counts_b <- Matrix::Matrix(
+    matrix(stats::rpois(80 * 30, lambda = 2), nrow = 80),
+    sparse = TRUE,
+    dimnames = list(paste0("g", 41:120), paste0("b", 1:30))
+  )
+  obj <- suppressWarnings(suppressMessages(
+    Seurat::CreateSeuratObject(counts = list(A = counts_a, B = counts_b))
+  ))
+
+  scop_result <- suppressWarnings(FindVariableFeatures(
+    obj,
+    selection.method = "vst",
+    nfeatures = 20,
+    verbose = FALSE
+  ))
+  seurat_result <- suppressWarnings(seurat_reference_method(
+    "FindVariableFeatures",
+    "Seurat",
+    obj,
+    selection.method = "vst",
+    nfeatures = 20,
+    verbose = FALSE
+  ))
+
+  expect_identical(
+    SeuratObject::VariableFeatures(scop_result),
+    SeuratObject::VariableFeatures(seurat_result)
+  )
+  expect_identical(
+    rownames(scop_result[[SeuratObject::DefaultAssay(scop_result)]]),
+    rownames(seurat_result[[SeuratObject::DefaultAssay(seurat_result)]])
+  )
+  scop_assay <- scop_result[[SeuratObject::DefaultAssay(scop_result)]]
+  seurat_assay <- seurat_result[[SeuratObject::DefaultAssay(seurat_result)]]
+  scop_meta <- methods::slot(scop_assay, "meta.data")
+  seurat_meta <- methods::slot(seurat_assay, "meta.data")
+  hvf_columns <- grep("^vf_vst_", colnames(scop_meta), value = TRUE)
+  expect_identical(rownames(scop_meta), rownames(seurat_meta))
+  scop_hvf <- scop_meta[, hvf_columns, drop = FALSE]
+  seurat_hvf <- seurat_meta[, hvf_columns, drop = FALSE]
+  logical_cols <- hvf_columns[vapply(scop_hvf, is.logical, logical(1L))]
+  numeric_cols <- hvf_columns[vapply(scop_hvf, is.numeric, logical(1L))]
+  if (length(logical_cols) > 0L) {
+    expect_identical(
+      scop_hvf[, logical_cols, drop = FALSE],
+      seurat_hvf[, logical_cols, drop = FALSE]
+    )
+  }
+  expect_equal(
+    scop_hvf[, numeric_cols, drop = FALSE],
+    seurat_hvf[, numeric_cols, drop = FALSE]
+  )
+  expect_true(isTRUE(methods::validObject(scop_assay, test = TRUE)))
+
+  reordered_obj <- suppressWarnings(suppressMessages(
+    Seurat::CreateSeuratObject(
+      counts = list(A = counts_a, B = counts_b[rev(seq_len(nrow(counts_b))), ])
+    )
+  ))
+  reordered_scop <- suppressWarnings(FindVariableFeatures(
+    reordered_obj,
+    selection.method = "vst",
+    nfeatures = 20,
+    verbose = FALSE
+  ))
+  reordered_seurat <- suppressWarnings(seurat_reference_method(
+    "FindVariableFeatures",
+    "Seurat",
+    reordered_obj,
+    selection.method = "vst",
+    nfeatures = 20,
+    verbose = FALSE
+  ))
+  expect_identical(
+    SeuratObject::VariableFeatures(reordered_scop),
+    SeuratObject::VariableFeatures(reordered_seurat)
+  )
+})

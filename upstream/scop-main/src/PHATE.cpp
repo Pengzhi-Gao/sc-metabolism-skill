@@ -1,0 +1,421 @@
+// [[Rcpp::depends(RcppArmadillo)]]
+#include <RcppArmadillo.h>
+#include <thisutils/log_message.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <vector>
+#include <limits>
+#include <random>
+#include <unordered_map>
+
+using namespace Rcpp;
+using namespace arma;
+
+static std::uint64_t phate_edge_key(int row, int col) {
+  return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(row)) << 32) |
+    static_cast<std::uint32_t>(col);
+}
+
+// [[Rcpp::export]]
+List phate_graphtools_affinity_data_cpp(
+    NumericMatrix data,
+    int knn,
+    double decay,
+    double thresh = 1e-4,
+    int knn_max = -1)
+{
+  const int n_cells = data.nrow();
+  const int n_features = data.ncol();
+  if (n_cells < 1) thisutils::log_message("data must contain at least one row", "error");
+  if (n_features < 1) thisutils::log_message("data must contain at least one column", "error");
+  knn = std::max(1, std::min(knn, std::max(1, n_cells - 1)));
+  const int max_neighbors = (knn_max > 0) ?
+    std::min(knn_max, std::max(1, n_cells - 1)) :
+    std::max(1, n_cells - 1);
+
+  std::vector<int> rows;
+  std::vector<int> cols;
+  std::vector<double> vals;
+  rows.reserve(static_cast<std::size_t>(n_cells) * static_cast<std::size_t>(max_neighbors + 1));
+  cols.reserve(rows.capacity());
+  vals.reserve(rows.capacity());
+
+  std::vector<std::pair<double, int> > distances;
+  distances.reserve(std::max(0, n_cells - 1));
+  for (int i = 0; i < n_cells; ++i) {
+    distances.clear();
+    for (int j = 0; j < n_cells; ++j) {
+      if (i == j) continue;
+      double dist_sq = 0.0;
+      for (int f = 0; f < n_features; ++f) {
+        const double diff = data(i, f) - data(j, f);
+        dist_sq += diff * diff;
+      }
+      distances.push_back(std::make_pair(std::sqrt(std::max(0.0, dist_sq)), j));
+    }
+    const int take = std::min(max_neighbors, static_cast<int>(distances.size()));
+    if (take <= 0) continue;
+    std::partial_sort(
+      distances.begin(),
+      distances.begin() + take,
+      distances.end(),
+      [](const std::pair<double, int>& a, const std::pair<double, int>& b) {
+        if (a.first == b.first) return a.second < b.second;
+        return a.first < b.first;
+      }
+    );
+    const int bw_pos = std::min(knn, take) - 1;
+    double bandwidth = distances[static_cast<std::size_t>(bw_pos)].first;
+    if (!std::isfinite(bandwidth) || bandwidth <= 0.0) {
+      bandwidth = std::numeric_limits<double>::epsilon();
+    }
+    for (int p = 0; p < take; ++p) {
+      const double d = distances[static_cast<std::size_t>(p)].first;
+      const int j = distances[static_cast<std::size_t>(p)].second;
+      const double weight = std::exp(-std::pow(d / bandwidth, decay));
+      if (std::isfinite(weight) && weight >= thresh) {
+        rows.push_back(i);
+        cols.push_back(j);
+        vals.push_back(weight);
+      }
+    }
+  }
+  for (int i = 0; i < n_cells; ++i) {
+    rows.push_back(i);
+    cols.push_back(i);
+    vals.push_back(1.0);
+  }
+
+  std::unordered_map<std::uint64_t, double> directed;
+  directed.reserve(vals.size() * 2);
+  for (std::size_t e = 0; e < vals.size(); ++e) {
+    const std::uint64_t key = phate_edge_key(rows[e], cols[e]);
+    directed[key] += vals[e];
+  }
+  std::unordered_map<std::uint64_t, double> sym;
+  sym.reserve(directed.size() * 2);
+  for (std::unordered_map<std::uint64_t, double>::const_iterator it = directed.begin();
+       it != directed.end();
+       ++it) {
+    const int row = static_cast<int>(it->first >> 32);
+    const int col = static_cast<int>(it->first & 0xffffffffU);
+    const std::uint64_t reverse_key = phate_edge_key(col, row);
+    double reverse_value = 0.0;
+    std::unordered_map<std::uint64_t, double>::const_iterator rit = directed.find(reverse_key);
+    if (rit != directed.end()) reverse_value = rit->second;
+    sym[it->first] = 0.5 * (it->second + reverse_value);
+    if (sym.find(reverse_key) == sym.end()) {
+      sym[reverse_key] = 0.5 * (reverse_value + it->second);
+    }
+  }
+
+  std::vector<int> sym_rows;
+  std::vector<int> sym_cols;
+  std::vector<double> sym_vals;
+  sym_rows.reserve(sym.size());
+  sym_cols.reserve(sym.size());
+  sym_vals.reserve(sym.size());
+  for (std::unordered_map<std::uint64_t, double>::const_iterator it = sym.begin();
+       it != sym.end();
+       ++it) {
+    const double v = it->second;
+    if (!std::isfinite(v) || v <= 0.0) continue;
+    sym_rows.push_back(static_cast<int>(it->first >> 32));
+    sym_cols.push_back(static_cast<int>(it->first & 0xffffffffU));
+    sym_vals.push_back(v);
+  }
+
+  return List::create(
+    _["affinity_rows"] = IntegerVector(sym_rows.begin(), sym_rows.end()),
+    _["affinity_cols"] = IntegerVector(sym_cols.begin(), sym_cols.end()),
+    _["affinity_vals"] = NumericVector(sym_vals.begin(), sym_vals.end()),
+    _["n_cells"] = n_cells
+  );
+}
+
+
+// [[Rcpp::export]]
+NumericMatrix phate_diffusion_operator_cpp(
+    IntegerVector rows,
+    IntegerVector cols,
+    NumericVector vals,
+    int n_cells,
+    int t_max = 10)
+{
+  mat P = zeros<mat>(n_cells, n_cells);
+  vec row_sums = zeros<vec>(n_cells);
+
+  int nnz = rows.size();
+  for (int e = 0; e < nnz; ++e) {
+    int i = rows[e];
+    int j = cols[e];
+    double v = vals[e];
+    if (i >= 0 && i < n_cells && j >= 0 && j < n_cells) {
+      P(i, j) += v;
+      row_sums(i) += v;
+    }
+  }
+
+  for (int i = 0; i < n_cells; ++i) {
+    if (row_sums(i) > 1e-15) {
+      for (int j = 0; j < n_cells; ++j) {
+        P(i, j) /= row_sums(i);
+      }
+    } else {
+      P(i, i) = 1.0;
+    }
+  }
+
+  mat Pt = P;
+  for (int t = 1; t < t_max; ++t) {
+    Pt = Pt * P;
+  }
+
+  const double eps = 1e-7;
+  mat logPt = zeros<mat>(n_cells, n_cells);
+  for (int i = 0; i < n_cells; ++i) {
+    for (int j = 0; j < n_cells; ++j) {
+      logPt(i, j) = std::log(Pt(i, j) + eps);
+    }
+  }
+
+  NumericMatrix result(n_cells, n_cells);
+  for (int i = 0; i < n_cells; ++i) {
+    for (int j = 0; j < n_cells; ++j) {
+      result(i, j) = logPt(i, j);
+    }
+  }
+  return result;
+}
+
+// [[Rcpp::export]]
+NumericMatrix phate_potential_distance_cpp(
+    NumericMatrix log_transition,
+    int n_landmarks = -1)
+{
+  const int n = log_transition.nrow();
+  if (log_transition.ncol() != n)
+    thisutils::log_message("log_transition must be a square matrix", "error");
+  const int use_landmarks = (n_landmarks > 0 && n_landmarks < n) ? n_landmarks : n;
+
+  mat logP(log_transition.begin(), n, n, false);
+
+  if (use_landmarks < n) {
+    std::vector<int> landmark_idx(n);
+    for (int i = 0; i < n; ++i) landmark_idx[i] = i;
+    std::mt19937 rng(42);
+    std::shuffle(landmark_idx.begin(), landmark_idx.end(), rng);
+    landmark_idx.resize(use_landmarks);
+
+    mat landmark_dist = zeros<mat>(n, use_landmarks);
+    for (int i = 0; i < n; ++i) {
+      for (int m = 0; m < use_landmarks; ++m) {
+        int lm = landmark_idx[m];
+        double dist = 0.0;
+        for (int d = 0; d < n; ++d) {
+          double diff = logP(i, d) - logP(lm, d);
+          dist += diff * diff;
+        }
+        landmark_dist(i, m) = std::sqrt(std::max(dist, 0.0));
+      }
+    }
+
+    NumericMatrix D(n, n);
+    for (int i = 0; i < n; ++i) {
+      D(i, i) = 0.0;
+      for (int j = i + 1; j < n; ++j) {
+        double dist = 0.0;
+        for (int m = 0; m < use_landmarks; ++m) {
+          double diff = landmark_dist(i, m) - landmark_dist(j, m);
+          dist += diff * diff;
+        }
+        D(i, j) = std::sqrt(std::max(dist, 0.0));
+        D(j, i) = D(i, j);
+      }
+    }
+    return D;
+  }
+
+  NumericMatrix D(n, n);
+  for (int i = 0; i < n; ++i) {
+    D(i, i) = 0.0;
+    for (int j = i + 1; j < n; ++j) {
+      double dist = 0.0;
+      for (int d = 0; d < n; ++d) {
+        double diff = logP(i, d) - logP(j, d);
+        dist += diff * diff;
+      }
+      D(i, j) = std::sqrt(std::max(dist, 0.0));
+      D(j, i) = D(i, j);
+    }
+  }
+  return D;
+}
+
+// [[Rcpp::export]]
+NumericMatrix phate_metric_mds_cpp(
+    NumericMatrix D,
+    int n_components = 2)
+{
+  const int n = D.nrow();
+  if (D.ncol() != n)
+    thisutils::log_message("D must be a square distance matrix", "error");
+  if (n < 1)
+    thisutils::log_message("D must contain at least one row", "error");
+  if (n_components < 1)
+    thisutils::log_message("n_components must be at least 1", "error");
+  if (n_components > n) n_components = n;
+
+  mat dist(D.begin(), n, n, false);
+
+  mat D2 = dist % dist;
+
+  mat centered = D2;
+  for (int j = 0; j < n; ++j) {
+    double col_mean = 0.0;
+    for (int i = 0; i < n; ++i) col_mean += D2(i, j);
+    col_mean /= static_cast<double>(n);
+    for (int i = 0; i < n; ++i) centered(i, j) -= col_mean;
+  }
+  for (int i = 0; i < n; ++i) {
+    double row_mean = 0.0;
+    for (int j = 0; j < n; ++j) row_mean += centered(i, j);
+    row_mean /= static_cast<double>(n);
+    for (int j = 0; j < n; ++j) centered(i, j) -= row_mean;
+  }
+
+  mat U;
+  vec s;
+  mat V;
+  svd(U, s, V, centered);
+
+  NumericMatrix embedding(n, n_components);
+  for (int c = 0; c < n_components; ++c) {
+    double sv = s(c);
+    for (int i = 0; i < n; ++i) {
+      embedding(i, c) = U(i, c) * sv;
+    }
+  }
+
+  return embedding;
+}
+
+// [[Rcpp::export]]
+int phate_find_optimal_t_cpp(
+    IntegerVector rows,
+    IntegerVector cols,
+    NumericVector vals,
+    int n_cells,
+    int t_max = 20)
+{
+  if (t_max < 1) t_max = 1;
+
+  mat P = zeros<mat>(n_cells, n_cells);
+  vec row_sums = zeros<vec>(n_cells);
+  int nnz = rows.size();
+  for (int e = 0; e < nnz; ++e) {
+    int i = rows[e], j = cols[e];
+    if (i >= 0 && i < n_cells && j >= 0 && j < n_cells) {
+      P(i, j) += vals[e];
+      row_sums(i) += vals[e];
+    }
+  }
+  for (int i = 0; i < n_cells; ++i) {
+    if (row_sums(i) > 1e-15) {
+      for (int j = 0; j < n_cells; ++j) P(i, j) /= row_sums(i);
+    } else {
+      P(i, i) = 1.0;
+    }
+  }
+
+  vec sv;
+  mat U;
+  mat V;
+  svd(U, sv, V, P);
+  const double dbl_eps = std::numeric_limits<double>::epsilon();
+  std::vector<double> vne_vals(t_max);
+  for (int t = 0; t < t_max; ++t) {
+    double sum_eig = 0.0;
+    for (int i = 0; i < n_cells; ++i) {
+      double v = std::pow(sv(i), static_cast<double>(t + 1));
+      sum_eig += v;
+    }
+    double vne = 0.0;
+    for (int i = 0; i < n_cells; ++i) {
+      double v = std::pow(sv(i), static_cast<double>(t + 1));
+      double prob = sum_eig > 0.0 ? v / sum_eig : 0.0;
+      prob += dbl_eps;
+      if (prob > 0.0) vne -= prob * std::log(prob);
+    }
+    vne_vals[t] = vne;
+  }
+
+  if (t_max < 3) return 1;
+  std::vector<double> x(t_max), y(t_max);
+  for (int i = 0; i < t_max; ++i) {
+    x[i] = static_cast<double>(i);
+    y[i] = vne_vals[i];
+  }
+
+  const int m = t_max - 1;
+  std::vector<double> sigma_xy(m), sigma_x(m), sigma_y(m), sigma_xx(m);
+  std::vector<double> mfwd(m), bfwd(m), mbck(m), bbck(m);
+
+  double cs_x = x[0], cs_y = y[0], cs_xx = x[0] * x[0], cs_xy = x[0] * y[0];
+  for (int i = 0; i < m; ++i) {
+    cs_x += x[i + 1];
+    cs_y += y[i + 1];
+    cs_xx += x[i + 1] * x[i + 1];
+    cs_xy += x[i + 1] * y[i + 1];
+    const double nn = static_cast<double>(i + 2);
+    const double det = nn * cs_xx - cs_x * cs_x;
+    if (std::abs(det) > 1e-15) {
+      mfwd[i] = (nn * cs_xy - cs_x * cs_y) / det;
+      bfwd[i] = -(cs_x * cs_xy - cs_xx * cs_y) / det;
+    } else {
+      mfwd[i] = 0.0;
+      bfwd[i] = 0.0;
+    }
+  }
+
+  cs_x = x[t_max - 1]; cs_y = y[t_max - 1];
+  cs_xx = x[t_max - 1] * x[t_max - 1];
+  cs_xy = x[t_max - 1] * y[t_max - 1];
+  for (int i = 0; i < m; ++i) {
+    const int rev = t_max - 2 - i;
+    cs_x += x[rev];
+    cs_y += y[rev];
+    cs_xx += x[rev] * x[rev];
+    cs_xy += x[rev] * y[rev];
+    const double nn = static_cast<double>(i + 2);
+    const double det = nn * cs_xx - cs_x * cs_x;
+    if (std::abs(det) > 1e-15) {
+      mbck[m - 1 - i] = (nn * cs_xy - cs_x * cs_y) / det;
+      bbck[m - 1 - i] = -(cs_x * cs_xy - cs_xx * cs_y) / det;
+    } else {
+      mbck[m - 1 - i] = 0.0;
+      bbck[m - 1 - i] = 0.0;
+    }
+  }
+
+  double best_error = std::numeric_limits<double>::max();
+  int loc = 1;
+  for (int breakpt = 1; breakpt < t_max - 1; ++breakpt) {
+    double err = 0.0;
+    for (int i = 0; i <= breakpt; ++i) {
+      const double pred = mfwd[breakpt - 1] * x[i] + bfwd[breakpt - 1];
+      err += std::abs(pred - y[i]);
+    }
+    for (int i = breakpt; i < t_max; ++i) {
+      const double pred = mbck[breakpt - 1] * x[i] + bbck[breakpt - 1];
+      err += std::abs(pred - y[i]);
+    }
+    if (err < best_error) {
+      best_error = err;
+      loc = breakpt;
+    }
+  }
+
+  return static_cast<int>(x[loc]);
+}

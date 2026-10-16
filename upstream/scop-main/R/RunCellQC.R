@@ -1,0 +1,2016 @@
+#' @title Doublet calling
+#'
+#' @md
+#' @inheritParams scop-params
+#' @param assay Assay used for doublet calling.
+#' @param db_method `"scDblFinder"`, `"Scrublet"`, `"DoubletDetection"`,
+#' `"scds_cxds"`, `"scds_bcds"`, or `"scds_hybrid"`.
+#' @param db_rate Expected doublet rate.
+#' @param data_type Optional [CheckDataType] result, used internally to avoid
+#' rescanning the count matrix.
+#' @param ... Passed to the selected doublet method.
+#'
+#' @return A `Seurat` object with doublet class and score columns in `meta.data`.
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunDoubletCalling(
+#'   pancreas_sub,
+#'   db_method = "scDblFinder"
+#' )
+#' table(pancreas_sub$db.scDblFinder_class)
+#' head(pancreas_sub@meta.data[, c(
+#'   "db.scDblFinder_class", "db.scDblFinder_score"
+#' )])
+RunDoubletCalling <- function(
+  object,
+  assay = "RNA",
+  db_rate = ncol(object) / 1000 * 0.01,
+  db_method = "scDblFinder",
+  data_type = NULL,
+  ...,
+  verbose = TRUE,
+  srt = NULL
+) {
+  object <- resolve_deprecated_srt(object, srt, missing(object))
+  if (!inherits(object, "Seurat")) {
+    log_message(
+      "{.arg object} is not a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  status <- data_type %||% CheckDataType(object, layer = "counts", assay = assay)
+  if (status != "raw_counts") {
+    log_message(
+      "Data type is not raw counts",
+      message_type = "error"
+    )
+  }
+  db_methods <- c(
+    "scDblFinder",
+    "Scrublet",
+    "DoubletDetection",
+    "scds_cxds",
+    "scds_bcds",
+    "scds_hybrid"
+  )
+  if (db_method %in% db_methods) {
+    methods <- unlist(strsplit(db_method, "_"))
+    method1 <- methods[1]
+    method2 <- methods[2]
+    if (is.na(method2)) {
+      args1 <- mget(names(formals()), sys.frame(sys.nframe()))
+      args2 <- as.list(match.call())
+    } else {
+      args1 <- c(
+        mget(names(formals()), sys.frame(sys.nframe())),
+        method = method2
+      )
+      args2 <- c(as.list(match.call()), method = method2)
+    }
+    for (n in names(args2)) {
+      args1[[n]] <- args2[[n]]
+    }
+    args1 <- args1[!names(args1) %in% c("db_method", "...", "srt")]
+    args1[["object"]] <- object
+    tryCatch(
+      expr = {
+        object <- do.call(
+          what = paste0("Run", method1),
+          args = args1
+        )
+      },
+      error = function(e) {
+        err_msg <- conditionMessage(e)
+        err_msg <- gsub("{", "{{", err_msg, fixed = TRUE)
+        err_msg <- gsub("}", "}}", err_msg, fixed = TRUE)
+        log_message(err_msg, message_type = "error")
+      }
+    )
+    return(object)
+  } else {
+    log_message(
+      "{.arg db_method} must be one of {.val {db_methods}}",
+      message_type = "error"
+    )
+  }
+}
+
+#' @title Run doublet-calling with scDblFinder
+#'
+#' @md
+#' @inheritParams RunDoubletCalling
+#' @param ... Additional arguments to be passed to [scDblFinder::scDblFinder()].
+#'
+#' @export
+RunscDblFinder <- function(
+  object,
+  assay = "RNA",
+  db_rate = ncol(srt) / 1000 * 0.01,
+  data_type = NULL,
+  ...,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  log_message("Running {.pkg scDblFinder}", verbose = verbose)
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} is not a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  status <- data_type %||% CheckDataType(srt, layer = "counts", assay = assay)
+  if (status != "raw_counts") {
+    log_message(
+      "Data type is not raw counts",
+      message_type = "error"
+    )
+  }
+  check_r("scDblFinder", verbose = FALSE)
+  sce <- Seurat::as.SingleCellExperiment(srt, assay = assay)
+  sce <- scDblFinder::scDblFinder(sce, dbr = db_rate, verbose = FALSE, ...)
+  srt[["db.scDblFinder_score"]] <- sce[["scDblFinder.score"]]
+  srt[["db.scDblFinder_class"]] <- sce[["scDblFinder.class"]]
+  return(srt)
+}
+
+#' @title Run doublet-calling with scds
+#'
+#' @md
+#' @inheritParams RunDoubletCalling
+#' @param method The method to be used for doublet-calling.
+#' Options are `"hybrid"`, `"cxds"`, or `"bcds"`.
+#' @param ... Additional arguments passed to the selected `scds` method.
+#'
+#' @export
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- Runscds(pancreas_sub, method = "hybrid")
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   reduction = "umap",
+#'   group.by = "db.scds_hybrid_class"
+#' )
+#'
+#' FeatureDimPlot(
+#'   pancreas_sub,
+#'   reduction = "umap",
+#'   features = "db.scds_hybrid_score"
+#' )
+Runscds <- function(
+  object,
+  assay = "RNA",
+  db_rate = ncol(srt) / 1000 * 0.01,
+  method = c("hybrid", "cxds", "bcds"),
+  data_type = NULL,
+  ...,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  log_message("Running {.pkg scds} with method {.val {method}}", verbose = verbose)
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} is not a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  status <- data_type %||% CheckDataType(srt, layer = "counts", assay = assay)
+  if (status != "raw_counts") {
+    log_message(
+      "Data type is not raw counts",
+      message_type = "error"
+    )
+  }
+  check_r("scds", verbose = FALSE)
+  method <- match.arg(method)
+  sce <- Seurat::as.SingleCellExperiment(srt, assay = assay)
+  scds_args <- list(...)
+  new_xgboost_api <- "y" %in% names(formals(getExportedValue("xgboost", "xgboost")))
+  sce <- switch(method,
+    cxds = do.call(scds::cxds, c(list(sce = sce), scds_args)),
+    bcds = if (new_xgboost_api) {
+      do.call(scds_bcds_xgboost_compat, c(list(sce = sce), scds_args))
+    } else {
+      do.call(scds::bcds, c(list(sce = sce), scds_args))
+    },
+    hybrid = if (new_xgboost_api) {
+      do.call(scds_hybrid_xgboost_compat, c(list(sce = sce), scds_args))
+    } else {
+      do.call(scds::cxds_bcds_hybrid, c(list(sce = sce), scds_args))
+    }
+  )
+  score_col <- paste0(method, "_score")
+  srt[[paste0("db.scds_", method, "_score")]] <- sce[[score_col]]
+  ntop <- ceiling(db_rate * ncol(sce))
+  db_qc <- names(sort(
+    srt[[paste0("db.scds_", method, "_score"), drop = TRUE]],
+    decreasing = TRUE
+  )[1:ntop])
+  srt[[paste0("db.scds_", method, "_class")]] <- "singlet"
+  srt[[paste0("db.scds_", method, "_class")]][db_qc, ] <- "doublet"
+  return(srt)
+}
+
+scds_bcds_xgboost_compat <- function(
+  sce,
+  ntop = 500,
+  srat = 1,
+  verb = FALSE,
+  retRes = FALSE,
+  nmax = "tune",
+  varImp = FALSE,
+  estNdbl = FALSE
+) {
+  counts <- SummarizedExperiment::assay(sce, "counts")
+  if (!inherits(counts, "sparseMatrix")) {
+    counts <- Matrix::Matrix(counts, sparse = TRUE)
+  }
+  informative <- Matrix::rowSums(counts > 0) > 0.01 * ncol(sce)
+  lc <- Matrix::t(log1p(counts[informative, , drop = FALSE]))
+  lc <- lc / Matrix::rowMeans(lc)
+  variances <- apply(lc, 2, stats::var)
+  hvg <- head(order(variances, decreasing = TRUE, na.last = NA), ntop)
+  if (length(hvg) == 0L) {
+    log_message("No variable genes are available for scds bcds", message_type = "error")
+  }
+  lc <- lc[, hvg, drop = FALSE]
+  lc <- lc / Matrix::rowMeans(lc)
+  p1 <- sample(seq_len(ncol(sce)), srat * ncol(sce), replace = TRUE)
+  p2 <- sample(seq_len(ncol(sce)), srat * ncol(sce), replace = TRUE)
+  simulated <- Matrix::t(log1p(
+    counts[informative, p1, drop = FALSE][hvg, , drop = FALSE] +
+      counts[informative, p2, drop = FALSE][hvg, , drop = FALSE]
+  ))
+  simulated <- simulated / Matrix::rowMeans(simulated)
+  x <- rbind(lc, simulated)
+  colnames(x) <- paste0("GEN_", seq_len(ncol(x)))
+  labels <- c(rep(0, nrow(lc)), rep(1, nrow(simulated)))
+  dmatrix <- xgboost::xgb.DMatrix(x, label = labels)
+  params <- list(
+    tree_method = "hist",
+    nthread = 2,
+    subsample = 0.5,
+    objective = "binary:logistic",
+    eval_metric = "error"
+  )
+
+  cv <- NULL
+  if (identical(nmax, "tune")) {
+    cv <- xgboost::xgb.cv(
+      params = params,
+      data = dmatrix,
+      nrounds = 500,
+      nfold = 5,
+      prediction = TRUE,
+      metrics = "error",
+      early_stopping_rounds = 2,
+      verbose = FALSE
+    )
+    best <- cv$best_iteration %||% which.min(cv$evaluation_log$test_error_mean)
+    cutoff <- cv$evaluation_log$test_error_mean[best] +
+      cv$evaluation_log$test_error_std[best]
+    eligible <- which(cv$evaluation_log$test_error_mean <= cutoff)
+    nmax <- if (length(eligible) > 0L) min(eligible) else best
+  }
+  nmax <- as.integer(nmax)
+  model <- xgboost::xgb.train(
+    params = params,
+    data = dmatrix,
+    nrounds = nmax,
+    verbose = 0
+  )
+  predictions <- if (is.null(cv)) {
+    as.numeric(stats::predict(model, dmatrix))
+  } else {
+    as.numeric(cv$pred %||% cv$cv_predict$pred)
+  }
+  sce$bcds_score <- predictions[seq_len(ncol(sce))]
+
+  if (estNdbl) {
+    simulated_scores <- as.numeric(stats::predict(model, dmatrix))[
+      seq.int(ncol(sce) + 1L, nrow(x))
+    ]
+    estimate_calls <- getFromNamespace("get_dblCalls_ALL", "scds")
+    estimate <- estimate_calls(sce$bcds_score, simulated_scores, rel_loss = srat)
+    metadata <- S4Vectors::metadata(sce)
+    metadata$bcds <- metadata$bcds %||% list()
+    metadata$bcds$ndbl <- estimate
+    metadata$bcds$sim_scores <- simulated_scores
+    S4Vectors::metadata(sce) <- metadata
+    sce$bcds_call <- sce$bcds_score >= estimate["balanced", "threshold"]
+  }
+
+  if (retRes) {
+    hvg_bool <- seq_len(nrow(sce)) %in% which(informative)
+    hvg_bool[hvg_bool] <- seq_len(sum(hvg_bool)) %in% hvg
+    hvg_order <- rep(NA_integer_, nrow(sce))
+    hvg_order[hvg_bool] <- which(informative)[hvg]
+    S4Vectors::mcols(sce)$bcds_hvg_bool <- hvg_bool
+    S4Vectors::mcols(sce)$bcds_hvg_ordr <- hvg_order
+    metadata <- S4Vectors::metadata(sce)
+    metadata$bcds_res_cv <- cv
+    metadata$bcds_res_all <- model
+    metadata$bcds_nmax <- nmax
+    if (varImp) {
+      importance <- xgboost::xgb.importance(model = model)
+      importance$col_index <- match(importance$Feature, colnames(x))
+      importance$gene_index <- hvg_order[hvg_bool][importance$col_index]
+      metadata$bcds_vimp <- importance[
+        seq_len(min(100L, nrow(importance))),
+        setdiff(colnames(importance), c("Cover", "col_index")),
+        drop = FALSE
+      ]
+    }
+    S4Vectors::metadata(sce) <- metadata
+  }
+  sce
+}
+
+scds_hybrid_xgboost_compat <- function(
+  sce,
+  cxdsArgs = NULL,
+  bcdsArgs = NULL,
+  verb = FALSE,
+  estNdbl = FALSE,
+  force = FALSE
+) {
+  cxdsArgs <- cxdsArgs %||% list()
+  bcdsArgs <- bcdsArgs %||% list()
+  cxdsArgs$estNdbl <- estNdbl
+  bcdsArgs$estNdbl <- estNdbl
+  metadata <- S4Vectors::metadata(sce)
+  run_cxds <- is.null(sce$cxds_score) ||
+    (estNdbl && is.null(metadata$cxds$ndbl)) || force
+  run_bcds <- is.null(sce$bcds_score) ||
+    (estNdbl && is.null(metadata$bcds$ndbl)) || force
+  if (run_cxds) {
+    sce <- do.call(scds::cxds, c(list(sce = sce), cxdsArgs))
+  }
+  if (run_bcds) {
+    sce <- do.call(scds_bcds_xgboost_compat, c(list(sce = sce), bcdsArgs))
+  }
+  squish <- function(x) {
+    finite <- is.finite(x)
+    if (!any(finite)) {
+      return(rep(0, length(x)))
+    }
+    limits <- range(x[finite])
+    if (diff(limits) == 0) {
+      return(rep(0, length(x)))
+    }
+    out <- (x - limits[1]) / diff(limits)
+    out[!finite] <- 0
+    out
+  }
+  sce$hybrid_score <- squish(sce$cxds_score) + squish(sce$bcds_score)
+  if (estNdbl) {
+    metadata <- S4Vectors::metadata(sce)
+    cxds_sim <- metadata$cxds$sim_scores
+    bcds_sim <- metadata$bcds$sim_scores
+    target_length <- min(length(cxds_sim), length(bcds_sim))
+    cxds_sim <- sample(cxds_sim, target_length)
+    bcds_sim <- sample(bcds_sim, target_length)
+    hybrid_sim <- squish(cxds_sim) + squish(bcds_sim)
+    estimate_calls <- getFromNamespace("get_dblCalls_ALL", "scds")
+    estimate <- estimate_calls(sce$hybrid_score, hybrid_sim)
+    metadata$hybrid <- metadata$hybrid %||% list()
+    metadata$hybrid$ndbl <- estimate
+    metadata$hybrid$sim_scores <- hybrid_sim
+    S4Vectors::metadata(sce) <- metadata
+    sce$hybrid_call <- sce$hybrid_score >= estimate["balanced", "threshold"]
+  }
+  sce
+}
+
+#' @title Run doublet-calling with Scrublet
+#'
+#' @md
+#' @inheritParams RunDoubletCalling
+#' @param ... Additional arguments to be passed to [scrublet.Scrublet](https://github.com/swolock/scrublet).
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunScrublet(pancreas_sub)
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   reduction = "umap",
+#'   group.by = "db.Scrublet_class"
+#' )
+#'
+#' FeatureDimPlot(
+#'   pancreas_sub,
+#'   reduction = "umap",
+#'   features = "db.Scrublet_score"
+#' )
+RunScrublet <- function(
+  object,
+  assay = "RNA",
+  db_rate = ncol(srt) / 1000 * 0.01,
+  data_type = NULL,
+  ...,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  user_args <- list(...)
+  log_message("Running {.pkg Scrublet}", verbose = verbose)
+  PrepareEnv(modules = "scrublet")
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} is not a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  status <- data_type %||% CheckDataType(srt, layer = "counts", assay = assay)
+  if (status != "raw_counts") {
+    log_message(
+      "Data type is not raw counts",
+      message_type = "error"
+    )
+  }
+  counts <- GetAssayData5(
+    object = srt,
+    assay = assay,
+    layer = "counts"
+  )
+  raw_counts <- python_cells_by_features(counts)
+  check_python("scrublet", verbose = FALSE)
+  scr <- reticulate::import("scrublet")
+  scrub_doublets_args <- c(
+    "synthetic_doublet_umi_subsampling",
+    "use_approx_neighbors",
+    "distance_metric",
+    "get_doublet_neighbor_parents",
+    "min_counts",
+    "min_cells",
+    "min_gene_variability_pctl",
+    "log_transform",
+    "mean_center",
+    "normalize_variance",
+    "n_prin_comps",
+    "svd_solver"
+  )
+  score_args <- user_args[intersect(names(user_args), scrub_doublets_args)]
+  integer_score_args <- c(
+    "min_counts",
+    "min_cells",
+    "min_gene_variability_pctl",
+    "n_prin_comps"
+  )
+  for (arg in intersect(names(score_args), integer_score_args)) {
+    score_args[[arg]] <- as.integer(score_args[[arg]])
+  }
+  constructor_args <- user_args[setdiff(names(user_args), names(score_args))]
+  scrub <- do.call(
+    scr$Scrublet,
+    c(list(raw_counts, expected_doublet_rate = db_rate), constructor_args)
+  )
+  res <- do.call(scrub$scrub_doublets, score_args)
+  doublet_scores <- res[[1]]
+  predicted_doublets <- res[[2]]
+  scrublet_threshold <- NA_real_
+  if (reticulate::py_has_attr(scrub, "threshold_")) {
+    scrublet_threshold <- suppressWarnings(
+      as.numeric(reticulate::py_to_r(scrub$threshold_))
+    )[1]
+  }
+  parameters <- list(
+    input_storage = if (inherits(raw_counts, "sparseMatrix")) "sparse" else "dense"
+  )
+  detected_doublet_rate <- mean(predicted_doublets)
+
+  srt[["db.Scrublet_score"]] <- doublet_scores
+  srt[["db.Scrublet_threshold"]] <- rep(scrublet_threshold, ncol(srt))
+  srt[["db.Scrublet_detected_rate"]] <- rep(detected_doublet_rate, ncol(srt))
+  srt[["db.Scrublet_class"]] <- sapply(
+    predicted_doublets,
+    function(i) {
+      switch(as.character(i),
+        "FALSE" = "singlet",
+        "TRUE" = "doublet"
+      )
+    }
+  )
+  srt@tools[["Scrublet"]] <- list(
+    expected_doublet_rate = db_rate,
+    threshold = scrublet_threshold,
+    detected_doublet_rate = detected_doublet_rate,
+    parameters = parameters
+  )
+  log_message(
+    "{.pkg Scrublet} doublet calling completed",
+    message_type = "success",
+    verbose = verbose
+  )
+  return(srt)
+}
+
+#' @title Run doublet-calling with DoubletDetection
+#'
+#' @md
+#' @inheritParams RunDoubletCalling
+#' @param cores The number of CPU cores to use for `doubletdetection`.
+#' @param ... Additional arguments to be passed to [doubletdetection.BoostClassifier](https://github.com/JonathanShor/DoubletDetection).
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunDoubletDetection(pancreas_sub)
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   reduction = "umap",
+#'   group.by = "db.DoubletDetection_class"
+#' )
+#'
+#' FeatureDimPlot(
+#'   pancreas_sub,
+#'   reduction = "umap",
+#'   features = "db.DoubletDetection_score"
+#' )
+RunDoubletDetection <- function(
+  object,
+  assay = "RNA",
+  db_rate = ncol(srt) / 1000 * 0.01,
+  cores = 1,
+  data_type = NULL,
+  ...,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  log_message("Running {.pkg DoubletDetection}", verbose = verbose)
+  PrepareEnv(modules = "doubletdetection")
+
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} is not a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  status <- data_type %||% CheckDataType(srt, layer = "counts", assay = assay)
+  if (status != "raw_counts") {
+    log_message(
+      "Data type is not raw counts",
+      message_type = "error"
+    )
+  }
+  user_args <- list(...)
+
+  if (!"n_jobs" %in% names(user_args)) {
+    user_args[["n_jobs"]] <- as.integer(cores)
+  }
+  if (!"n_iters" %in% names(user_args)) {
+    user_args[["n_iters"]] <- as.integer(5)
+  }
+  if (!"standard_scaling" %in% names(user_args)) {
+    user_args[["standard_scaling"]] <- TRUE
+  }
+
+  check_python("doubletdetection")
+  check_python("louvain")
+
+  doubletdetection <- reticulate::import("doubletdetection")
+  counts <- GetAssayData5(
+    object = srt,
+    assay = assay,
+    layer = "counts"
+  )
+  clf <- do.call(doubletdetection$BoostClassifier, user_args)
+
+  clf_fit <- clf$fit(Matrix::t(counts))
+
+  labels <- clf_fit$predict()
+  scores <- clf_fit$doublet_score()
+
+  labels <- as.integer(reticulate::py_to_r(labels))
+  scores <- as.numeric(reticulate::py_to_r(scores))
+
+  n_cells <- ncol(srt)
+  if (length(labels) != n_cells) {
+    log_message(
+      "Length of labels ({.val {length(labels)}}) does not match number of cells",
+      message_type = "error"
+    )
+  }
+  if (length(scores) != n_cells) {
+    log_message(
+      "Length of scores ({.val {length(scores)}}) does not match number of cells",
+      message_type = "error"
+    )
+  }
+
+  cell_names <- colnames(srt)
+
+  if (!is.null(names(scores)) && !identical(names(scores), cell_names)) {
+    scores <- scores[cell_names]
+  }
+  if (!is.null(names(labels)) && !identical(names(labels), cell_names)) {
+    labels <- labels[cell_names]
+  }
+
+  scores <- unname(scores)
+  labels <- unname(labels)
+
+  class_map <- c(
+    "0" = "singlet",
+    "1" = "doublet"
+  )
+  class_labels <- unname(class_map[as.character(labels)])
+  idx_unknown <- is.na(class_labels)
+  if (any(idx_unknown)) {
+    log_message(
+      "Found {.val {sum(idx_unknown)}} cells with unexpected DoubletDetection labels; setting to {.val doublet}",
+      message_type = "warning",
+      verbose = verbose
+    )
+    class_labels[idx_unknown] <- "doublet"
+  }
+  class_labels <- factor(class_labels, levels = c("singlet", "doublet"))
+
+  srt@meta.data$db.DoubletDetection_score <- scores
+  srt@meta.data$db.DoubletDetection_class <- class_labels
+
+  log_message(
+    "{.pkg DoubletDetection} doublet calling completed",
+    message_type = "success",
+    verbose = verbose
+  )
+  return(srt)
+}
+
+#' @title Ambient RNA decontamination with decontX
+#'
+#' @md
+#' @inheritParams scop-params
+#' @param assay Assay to decontaminate.
+#' @param group.by,batch Cell cluster and batch labels passed to [decontX::decontX()].
+#' Column name, cell-aligned vector, or `NULL`.
+#' @param background Background / empty-droplet input: a `Seurat` object,
+#' `SingleCellExperiment`, or count matrix.
+#' @param background_assay Assay used when `background` is a `Seurat` or
+#' `SingleCellExperiment`. `NULL` uses `assay` (Seurat) or `"counts"` (SCE).
+#' @param bg_batch Batch labels for `background`.
+#' @param assay_name,store_assay,round_counts Store rounded decontaminated counts
+#' as a new assay.
+#' @param data_type Optional [CheckDataType()] result, used internally to avoid
+#' rescanning the count matrix.
+#' @param ... Passed to [decontX::decontX()].
+#'
+#' @return A `Seurat` object with decontX contamination in `meta.data` and
+#' optional decontaminated counts in a new assay.
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunDecontX(
+#'   pancreas_sub,
+#'   group.by = "CellType"
+#' )
+#'
+#' FeatureStatPlot(
+#'   pancreas_sub,
+#'   stat.by = "decontX_contamination"
+#' )
+#'
+#' FeatureDimPlot(
+#'   pancreas_sub,
+#'   features = "decontX_contamination"
+#' )
+RunDecontX <- function(
+  object,
+  assay = "RNA",
+  group.by = NULL,
+  batch = NULL,
+  background = NULL,
+  background_assay = NULL,
+  bg_batch = NULL,
+  assay_name = "decontXcounts",
+  store_assay = TRUE,
+  round_counts = FALSE,
+  data_type = NULL,
+  seed = 11,
+  ...,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  log_message("Running {.pkg decontX}", verbose = verbose)
+
+  .decontx_get_meta <- function(object) {
+    if (inherits(object, "Seurat")) {
+      return(object@meta.data)
+    }
+    if (
+      inherits(object, "SingleCellExperiment") ||
+        inherits(object, "SummarizedExperiment")
+    ) {
+      return(as.data.frame(SummarizedExperiment::colData(object)))
+    }
+    NULL
+  }
+
+  .decontx_resolve_vector <- function(object, value, arg_name) {
+    if (is.null(value)) {
+      return(NULL)
+    }
+    meta <- .decontx_get_meta(object)
+    cells <- colnames(object)
+
+    if (
+      !is.null(meta) &&
+        is.character(value) &&
+        length(value) == 1 &&
+        value %in% colnames(meta)
+    ) {
+      return(meta[[value]])
+    }
+
+    if (!is.null(names(value))) {
+      idx <- match(cells, names(value))
+      if (all(!is.na(idx))) {
+        return(unname(value[idx]))
+      }
+    }
+
+    if (length(value) == length(cells)) {
+      return(unname(value))
+    }
+
+    log_message(
+      "{.arg {arg_name}} must be NULL, a metadata column name, or a vector aligned to the cells",
+      message_type = "error"
+    )
+  }
+
+  .decontx_as_input <- function(
+    object,
+    assay_name = NULL,
+    arg_name = "background"
+  ) {
+    if (is.null(object)) {
+      return(NULL)
+    }
+    if (inherits(object, "Seurat")) {
+      assay_use <- assay_name %||% assay
+      if (isFALSE(assay_use %in% SeuratObject::Assays(object))) {
+        log_message(
+          "{.arg {arg_name}} does not contain assay {.val {assay_use}}",
+          message_type = "error"
+        )
+      }
+      return(Seurat::as.SingleCellExperiment(object, assay = assay_use))
+    }
+    if (inherits(object, "SingleCellExperiment")) {
+      return(object)
+    }
+    if (inherits(object, "Matrix") || is.matrix(object)) {
+      return(object)
+    }
+    log_message(
+      "{.arg {arg_name}} must be a {.cls Seurat}, {.cls SingleCellExperiment}, or count matrix",
+      message_type = "error"
+    )
+  }
+
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} is not a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  if (isFALSE(assay %in% SeuratObject::Assays(srt))) {
+    log_message(
+      "{.arg srt} does not contain {.arg {assay}} assay",
+      message_type = "error"
+    )
+  }
+
+  status <- data_type %||% CheckDataType(srt, layer = "counts", assay = assay)
+  if (status != "raw_counts") {
+    log_message(
+      "Data type is not raw counts",
+      message_type = "warning",
+      verbose = verbose
+    )
+  }
+
+  check_r(c("decontX", "SingleCellExperiment"), verbose = FALSE)
+
+  sce <- Seurat::as.SingleCellExperiment(srt, assay = assay)
+  group_use <- .decontx_resolve_vector(
+    srt,
+    group.by,
+    "group.by"
+  )
+  if (!is.null(group_use) && !is.factor(group_use)) {
+    group_use <- factor(group_use)
+  }
+  batch_use <- .decontx_resolve_vector(srt, batch, "batch")
+
+  background_is_seurat <- inherits(background, "Seurat")
+  background_is_sce <- inherits(background, "SingleCellExperiment")
+  background_input <- .decontx_as_input(
+    object = background,
+    assay_name = background_assay,
+    arg_name = "background"
+  )
+  bg_assay_name_use <- NULL
+  if (background_is_seurat) {
+    bg_assay_name_use <- "counts"
+  } else if (background_is_sce) {
+    bg_assay_name_use <- background_assay %||% "counts"
+  }
+  if (is.null(background_input) && !is.null(bg_batch)) {
+    log_message(
+      "{.arg bg_batch} requires {.arg background} to be provided.",
+      message_type = "error"
+    )
+  }
+  bg_batch_use <- .decontx_resolve_vector(
+    background_input,
+    bg_batch,
+    "bg_batch"
+  )
+
+  user_args <- list(...)
+  decontx_args <- c(
+    list(
+      x = sce,
+      assayName = "counts",
+      z = group_use,
+      batch = batch_use,
+      background = background_input,
+      bgBatch = bg_batch_use,
+      seed = seed
+    ),
+    user_args
+  )
+  if (is.null(decontx_args[["verbose"]])) {
+    decontx_args[["verbose"]] <- FALSE
+  }
+  if (inherits(background_input, "SingleCellExperiment")) {
+    decontx_args[["bgAssayName"]] <- bg_assay_name_use %||% "counts"
+  }
+
+  sce <- do.call(decontX::decontX, args = decontx_args)
+
+  metadata_to_add <- data.frame(
+    decontX_contamination = sce[["decontX_contamination"]],
+    decontX_clusters = sce[["decontX_clusters"]],
+    row.names = colnames(srt)
+  )
+  srt <- Seurat::AddMetaData(
+    object = srt,
+    metadata = metadata_to_add
+  )
+  srt@tools[["decontX"]] <- S4Vectors::metadata(sce)[["decontX"]]
+
+  decontX_contamination_values <- sce[["decontX_contamination"]]
+  if (
+    length(decontX_contamination_values) > 0 &&
+      any(!is.na(decontX_contamination_values))
+  ) {
+    decontX_contamination_summary <- sprintf(
+      "%.4f / %.4f / %.4f",
+      stats::median(decontX_contamination_values, na.rm = TRUE),
+      mean(decontX_contamination_values, na.rm = TRUE),
+      max(decontX_contamination_values, na.rm = TRUE)
+    )
+    log_message(
+      "decontX contamination (median/mean/max): {decontX_contamination_summary}",
+      verbose = verbose
+    )
+  }
+
+  if (isTRUE(store_assay)) {
+    decontx_counts <- decontX::decontXcounts(sce)
+    if (isTRUE(round_counts)) {
+      decontx_counts <- round(decontx_counts)
+    }
+    if (!inherits(decontx_counts, "Matrix")) {
+      decontx_counts <- Matrix::Matrix(decontx_counts, sparse = TRUE)
+    }
+    srt[[assay_name]] <- Seurat::CreateAssayObject(counts = decontx_counts)
+    log_message("decontX assay stored as {assay_name}", verbose = verbose)
+  }
+
+  log_message(
+    "{.pkg decontX} decontamination completed",
+    message_type = "success",
+    verbose = verbose
+  )
+  return(srt)
+}
+
+#' @title Cell-level quality control
+#'
+#' @md
+#' @inheritParams CellDimPlot
+#' @inheritParams RunDoubletCalling
+#' @inheritParams scop-params
+#' @param split.by Metadata column used to run QC separately per split, then merge.
+#' @param return_filtered Return only cells that pass QC.
+#' @param qc_metrics Metrics to apply: `"doublets"`, `"decontX"`, `"atac"`,
+#' `"outlier"`, `"umi"`, `"gene"`, `"mito"`, `"ribo"`, `"hb"`, `"ribo_mito_ratio"`,
+#' `"species"`, and any name in `qc_features`. Default for RNA is
+#' `c("doublets", "decontX", "outlier", "umi", "gene", "mito", "ribo",
+#' "ribo_mito_ratio", "species")`; for `ChromatinAssay`, `"atac"`.
+#' @param db_method Doublet method: `"scDblFinder"`, `"Scrublet"`,
+#' `"DoubletDetection"`, `"scds_cxds"`, `"scds_bcds"`, or `"scds_hybrid"`.
+#' Labels are aggregated into `db_qc` and do not change other thresholds.
+#' @param outlier_threshold Outlier rules as `"metric:tail:nmads"`.
+#' @param db_coefficient Doublet rate is `ncol(srt) / 1000 * db_coefficient`.
+#' @param decontX_threshold Filter cells with `decontX_contamination` above this
+#' value. `NULL` computes decontX without filtering.
+#' @param group.by,decontX_batch,decontX_background,decontX_background_assay,decontX_bg_batch
+#' Passed to [RunDecontX()] when `"decontX"` is in `qc_metrics`.
+#' @param decontX_assay_name,decontX_store_assay,decontX_round_counts
+#' Store decontaminated counts from [RunDecontX()].
+#' @param decontX_args Extra [RunDecontX()] arguments. Explicit `decontX_*`
+#' parameters take precedence.
+#' @param atac_args Extra [RunATACQC()] arguments. Thresholds label `atac_qc`;
+#' filtering is done by [RunCellQC()].
+#' @param outlier_n Minimum number of outlier rules a cell must fail.
+#' @param UMI_threshold,gene_threshold Keep cells with UMI/gene counts above these.
+#' @param mito_threshold,mito_pattern,mito_gene Discard cells above this mitochondrial
+#' percentage. `mito_gene` overrides `mito_pattern`.
+#' @param ribo_threshold,ribo_pattern,ribo_gene Discard cells above this ribosomal
+#' percentage. `ribo_gene` overrides `ribo_pattern`.
+#' @param ribo_mito_ratio_range Accepted ribosomal/mitochondrial ratio range.
+#' @param species,species_gene_prefix,species_percent Species suffix for QC metrics
+#' (first is the species of interest) and minimum UMI percentage of that species.
+#' @param hb_range,hb_pattern,hb_gene Hemoglobin percentage range and feature matching.
+#' `hb_gene` overrides `hb_pattern`.
+#' @param qc_features Named list of extra feature-percentage rules. Each rule needs
+#' exactly one of `features` or `pattern`, plus a length-2 `range`. Computes
+#' `percent.<name>`; filtering/`<name>_qc` only when `<name>` is in `qc_metrics`.
+#'
+#' @return A `Seurat` object with QC results in `meta.data`.
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunCellQC(
+#'   pancreas_sub,
+#'   qc_metrics = c("umi", "gene", "example_set"),
+#'   qc_features = list(
+#'     example_set = list(
+#'       features = head(rownames(pancreas_sub), 5),
+#'       range = c(0, 0)
+#'     )
+#'   )
+#' )
+#' head(pancreas_sub@meta.data[, c("percent.hb", "percent.example_set")])
+#' # Hemoglobin expression can be biological signal in erythroid samples;
+#' # include "hb" in qc_metrics only when HB-based filtering is appropriate.
+#'
+#' CellStatPlot(
+#'   pancreas_sub,
+#'   stat.by = c(
+#'     "umi_qc", "gene_qc", "example_set_qc"
+#'   ),
+#'   plot_type = "upset",
+#'   stat_level = "Fail"
+#' )
+RunCellQC <- function(
+  object,
+  assay = "RNA",
+  split.by = NULL,
+  group.by = NULL,
+  return_filtered = FALSE,
+  qc_metrics = c("doublets", "decontX", "atac", "outlier", "umi", "gene", "mito", "ribo", "ribo_mito_ratio", "species"),
+  db_method = "scDblFinder",
+  db_rate = NULL,
+  db_coefficient = 0.01,
+  decontX_threshold = NULL,
+  decontX_batch = NULL,
+  decontX_background = NULL,
+  decontX_background_assay = NULL,
+  decontX_bg_batch = NULL,
+  decontX_assay_name = "decontXcounts",
+  decontX_store_assay = FALSE,
+  decontX_round_counts = TRUE,
+  decontX_args = list(),
+  atac_args = list(),
+  outlier_threshold = c("log10_nCount:lower:2.5", "log10_nCount:higher:5", "log10_nFeature:lower:2.5", "log10_nFeature:higher:5", "featurecount_dist:lower:2.5"),
+  outlier_n = 1,
+  UMI_threshold = 3000,
+  gene_threshold = 1000,
+  mito_threshold = 20,
+  mito_pattern = c("MT-", "Mt-", "mt-"),
+  mito_gene = NULL,
+  ribo_threshold = 50,
+  ribo_pattern = c("RP[SL]\\d+\\w{0,1}\\d*$", "Rp[sl]\\d+\\w{0,1}\\d*$", "rp[sl]\\d+\\w{0,1}\\d*$"),
+  ribo_gene = NULL,
+  ribo_mito_ratio_range = c(1, Inf),
+  species = NULL,
+  species_gene_prefix = NULL,
+  species_percent = 95,
+  seed = 11,
+  verbose = TRUE,
+  hb_range = c(0, 5),
+  hb_pattern = c("HB[^P]", "Hb[^p]", "hb[^p]"),
+  hb_gene = NULL,
+  qc_features = list(),
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  log_message(
+    "Running cell-level quality control",
+    message_type = "running",
+    verbose = verbose
+  )
+  set.seed(seed)
+
+  group.by_missing <- missing(group.by)
+  decontX_batch_missing <- missing(decontX_batch)
+  decontX_background_missing <- missing(decontX_background)
+  decontX_background_assay_missing <- missing(decontX_background_assay)
+  decontX_bg_batch_missing <- missing(decontX_bg_batch)
+  decontX_assay_name_missing <- missing(decontX_assay_name)
+  decontX_store_assay_missing <- missing(decontX_store_assay)
+  decontX_round_counts_missing <- missing(decontX_round_counts)
+
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} is not a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  if (isFALSE(assay %in% SeuratObject::Assays(srt))) {
+    log_message(
+      "{.arg srt} does not contain {.arg {assay}} assay",
+      message_type = "error"
+    )
+  }
+  if (length(species) != length(species_gene_prefix)) {
+    log_message(
+      "{.arg species_gene_prefix} must be the same length as {.arg species}.",
+      message_type = "error"
+    )
+  }
+  if (length(species) == 0) {
+    species <- species_gene_prefix <- NULL
+  }
+  if (
+    !is.null(decontX_threshold) &&
+      (!is.numeric(decontX_threshold) || length(decontX_threshold) != 1)
+  ) {
+    log_message(
+      "{.arg decontX_threshold} must be NULL or a single numeric value.",
+      message_type = "error"
+    )
+  }
+  if (!is.list(decontX_args)) {
+    log_message(
+      "{.arg decontX_args} must be a named list.",
+      message_type = "error"
+    )
+  }
+  if (!is.list(atac_args)) {
+    log_message(
+      "{.arg atac_args} must be a named list.",
+      message_type = "error"
+    )
+  }
+  is_atac_assay <- inherits(srt[[assay]], "ChromatinAssay")
+  if (isTRUE(is_atac_assay) && missing(qc_metrics)) {
+    qc_metrics <- "atac"
+  }
+  if (!is.character(qc_metrics) || anyNA(qc_metrics)) {
+    log_message(
+      "{.arg qc_metrics} must be a character vector without missing values",
+      message_type = "error"
+    )
+  }
+  if (
+    isTRUE(is_atac_assay) &&
+      ("hb" %in% qc_metrics || !is.null(hb_gene) || length(qc_features) > 0)
+  ) {
+    log_message(
+      "{.arg hb} and {.arg qc_features} require an RNA-like assay, not a {.cls ChromatinAssay}",
+      message_type = "error"
+    )
+  }
+  assay_features <- rownames(Seurat::GetAssay(srt, assay = assay))
+  if (!is.list(qc_features)) {
+    log_message("qc_features must be a named list", message_type = "error")
+  }
+  if (length(qc_features) > 0) {
+    rule_names <- names(qc_features)
+    if (
+      is.null(rule_names) ||
+        anyNA(rule_names) ||
+        any(!nzchar(rule_names)) ||
+        anyDuplicated(rule_names)
+    ) {
+      log_message("qc_features must have unique, non-empty names", message_type = "error")
+    }
+    if (any(make.names(rule_names) != rule_names)) {
+      log_message("qc_features names must be syntactically valid R names", message_type = "error")
+    }
+    species_suffix <- c("", paste0(".", species))
+    built_in_columns <- c(
+      unlist(lapply(species_suffix, function(suffix) {
+        paste0(
+          c("percent.mito", "percent.ribo", "percent.hb", "percent.genome"),
+          suffix
+        )
+      }), use.names = FALSE),
+      "db_qc", "atac_qc", "decontX_qc", "outlier_qc", "umi_qc",
+      "gene_qc", "mito_qc", "ribo_qc", "hb_qc", "ribo_mito_ratio_qc",
+      "species_qc", "CellQC"
+    )
+    generated_columns <- c(
+      paste0("percent.", rule_names),
+      paste0(rule_names, "_qc")
+    )
+    conflicting_columns <- intersect(generated_columns, built_in_columns)
+    if (length(conflicting_columns) > 0) {
+      log_message(
+        sprintf(
+          "qc_features names generate columns that conflict with built-in QC columns: %s",
+          paste(conflicting_columns, collapse = ", ")
+        ),
+        message_type = "error"
+      )
+    }
+
+    qc_features_validated <- vector("list", length(qc_features))
+    names(qc_features_validated) <- rule_names
+    for (rule_name in rule_names) {
+      rule <- qc_features[[rule_name]]
+      if (!is.list(rule)) {
+        log_message(
+          sprintf("qc_features rule '%s' must be a list", rule_name),
+          message_type = "error"
+        )
+      }
+      unknown_fields <- setdiff(names(rule), c("features", "pattern", "range"))
+      if (length(unknown_fields) > 0) {
+        log_message(
+          sprintf(
+            "qc_features rule '%s' contains unsupported fields: %s",
+            rule_name,
+            paste(unknown_fields, collapse = ", ")
+          ),
+          message_type = "error"
+        )
+      }
+      has_features <- !is.null(rule[["features"]])
+      has_pattern <- !is.null(rule[["pattern"]])
+      if (has_features == has_pattern) {
+        log_message(
+          sprintf(
+            "qc_features rule '%s' must provide exactly one of features or pattern",
+            rule_name
+          ),
+          message_type = "error"
+        )
+      }
+      rule_range <- cellqc_validate_range(
+        rule[["range"]],
+        sprintf("qc_features[['%s']]$range", rule_name)
+      )
+      if (has_features) {
+        requested <- rule[["features"]]
+        if (
+          !is.character(requested) ||
+            length(requested) == 0 ||
+            anyNA(requested) ||
+            any(!nzchar(requested))
+        ) {
+          log_message(
+            sprintf(
+              "qc_features rule '%s' features must be a non-empty character vector",
+              rule_name
+            ),
+            message_type = "error"
+          )
+        }
+        requested <- unique(requested)
+        resolved <- intersect(requested, assay_features)
+        missing_features <- setdiff(requested, resolved)
+        if (length(missing_features) > 0 && length(resolved) > 0) {
+          log_message(
+            sprintf(
+              "qc_features rule '%s' ignored missing features: %s",
+              rule_name,
+              paste(missing_features, collapse = ", ")
+            ),
+            message_type = "warning"
+          )
+        }
+      } else {
+        patterns <- rule[["pattern"]]
+        if (
+          !is.character(patterns) ||
+            length(patterns) == 0 ||
+            anyNA(patterns) ||
+            any(!nzchar(patterns))
+        ) {
+          log_message(
+            sprintf(
+              "qc_features rule '%s' pattern must be a non-empty character vector",
+              rule_name
+            ),
+            message_type = "error"
+          )
+        }
+        resolved <- tryCatch(
+          unique(unlist(lapply(
+            patterns,
+            function(pattern) grep(pattern, assay_features, value = TRUE)
+          ))),
+          error = function(e) {
+            log_message(
+              sprintf(
+                "qc_features rule '%s' has an invalid pattern: %s",
+                rule_name,
+                conditionMessage(e)
+              ),
+              message_type = "error"
+            )
+          }
+        )
+      }
+      if (length(resolved) == 0) {
+        log_message(
+          sprintf(
+            "qc_features rule '%s' did not match any assay features",
+            rule_name
+          ),
+          message_type = "error"
+        )
+      }
+      qc_features_validated[[rule_name]] <- list(
+        features = resolved,
+        range = rule_range
+      )
+    }
+    qc_features <- qc_features_validated
+  }
+  hb_range <- cellqc_validate_range(hb_range, "hb_range")
+  if (
+    !is.null(hb_gene) &&
+      (
+        !is.character(hb_gene) ||
+          length(hb_gene) == 0 ||
+          anyNA(hb_gene) ||
+          any(!nzchar(hb_gene))
+      )
+  ) {
+    log_message(
+      "{.arg hb_gene} must be NULL or a non-empty character vector",
+      message_type = "error"
+    )
+  }
+  if (is.null(hb_gene)) {
+    if (
+      !is.character(hb_pattern) ||
+        length(hb_pattern) == 0 ||
+        anyNA(hb_pattern) ||
+        any(!nzchar(hb_pattern))
+    ) {
+      log_message(
+        "{.arg hb_pattern} must be a non-empty character vector",
+        message_type = "error"
+      )
+    }
+    tryCatch(
+      lapply(hb_pattern, grep, x = assay_features),
+      error = function(e) {
+        log_message(
+          sprintf("hb_pattern contains an invalid regex: %s", conditionMessage(e)),
+          message_type = "error"
+        )
+      }
+    )
+  }
+  if (!is.null(hb_gene)) {
+    hb_gene <- unique(hb_gene)
+    hb_gene_found <- intersect(hb_gene, assay_features)
+    hb_gene_missing <- setdiff(hb_gene, hb_gene_found)
+    if (length(hb_gene_found) == 0) {
+      log_message(
+        "{.arg hb_gene} did not match any assay features",
+        message_type = "error"
+      )
+    }
+    if (length(hb_gene_missing) > 0) {
+      log_message(
+        sprintf(
+          "hb_gene ignored missing features: %s",
+          paste(hb_gene_missing, collapse = ", ")
+        ),
+        message_type = "warning"
+      )
+    }
+    hb_gene <- hb_gene_found
+  }
+  qc_metrics_available <- c(
+    "doublets", "decontX", "atac", "outlier", "umi", "gene",
+    "mito", "ribo", "hb", "ribo_mito_ratio", "species",
+    names(qc_features)
+  )
+  if (any(!qc_metrics %in% qc_metrics_available)) {
+    log_message(
+      "{.arg qc_metrics} contains unsupported values: {.val {setdiff(qc_metrics, qc_metrics_available)}}",
+      message_type = "error"
+    )
+  }
+  active_qc_features <- intersect(names(qc_features), qc_metrics)
+  decontX_assay_name_use <- decontX_args[["assay_name"]] %||% "decontXcounts"
+  if (!decontX_assay_name_missing) {
+    decontX_assay_name_use <- decontX_assay_name
+  }
+  decontX_store_assay_use <- decontX_args[["store_assay"]] %||% TRUE
+  if (!decontX_store_assay_missing) {
+    decontX_store_assay_use <- decontX_store_assay
+  }
+  decontX_round_counts_use <- decontX_args[["round_counts"]] %||% FALSE
+  if (!decontX_round_counts_missing) {
+    decontX_round_counts_use <- decontX_round_counts
+  }
+  status <- CheckDataType(srt, layer = "counts", assay = assay)
+  if (status != "raw_counts") {
+    log_message(
+      "Data type is not raw counts",
+      message_type = "warning",
+      verbose = verbose
+    )
+  }
+  srt <- cellqc_initialize_count_metrics(srt, assay = assay)
+  srt_raw <- srt
+  if (!is.null(split.by)) {
+    split_cells <- split(colnames(srt), srt@meta.data[[split.by]])
+  } else {
+    split_cells <- list(colnames(srt))
+  }
+  srt_list <- vector("list", length(split_cells))
+  names(srt_list) <- names(split_cells)
+
+  for (i in seq_along(split_cells)) {
+    if (!is.null(split.by)) {
+      srt <- srt_raw[, split_cells[[i]]]
+      log_message("Running QC for {.val {srt@meta.data[[split.by]][1]}}", verbose = verbose)
+    } else {
+      srt <- srt_raw
+    }
+    ntotal <- ncol(srt)
+
+    db_qc <- c()
+    if ("doublets" %in% qc_metrics) {
+      if (!is.null(db_method)) {
+        db_rate_use <- db_rate
+        if (is.null(db_rate_use)) {
+          db_rate_use <- ncol(srt) / 1000 * db_coefficient
+        }
+        if (db_rate_use >= 1) {
+          log_message(
+            "The db_rate is equal to or greater than 1",
+            message_type = "error"
+          )
+        }
+        for (dbm in db_method) {
+          srt <- do.call(
+            what = RunDoubletCalling,
+            args = list(
+              object = srt,
+              db_method = dbm,
+              db_rate = db_rate_use,
+              data_type = status
+            )
+          )
+          db_qc <- unique(c(
+            db_qc,
+            colnames(srt)[
+              srt[[paste0("db.", dbm, "_class"), drop = TRUE]] == "doublet"
+            ]
+          ))
+        }
+      }
+    }
+
+    atac_qc <- c()
+    if ("atac" %in% qc_metrics) {
+      if (!inherits(srt[[assay]], "ChromatinAssay")) {
+        log_message(
+          "Skip {.val atac} QC because {.arg assay = '{assay}'} is not a {.cls ChromatinAssay}",
+          message_type = "warning",
+          verbose = verbose
+        )
+      } else {
+        atac_args_use <- atac_args
+        min_pct_reads_in_peaks <- atac_args_use[["min_pct_reads_in_peaks"]] %||% NULL
+        min_TSS_enrichment <- atac_args_use[["min_TSS_enrichment"]] %||% NULL
+        max_nucleosome_signal <- atac_args_use[["max_nucleosome_signal"]] %||% NULL
+        max_blacklist_ratio <- atac_args_use[["max_blacklist_ratio"]] %||% NULL
+        atac_args_use[["min_pct_reads_in_peaks"]] <- NULL
+        atac_args_use[["min_TSS_enrichment"]] <- NULL
+        atac_args_use[["max_nucleosome_signal"]] <- NULL
+        atac_args_use[["max_blacklist_ratio"]] <- NULL
+        atac_args_use[["object"]] <- srt
+        atac_args_use[["assay"]] <- assay
+        if (is.null(atac_args_use[["verbose"]])) {
+          atac_args_use[["verbose"]] <- TRUE
+        }
+        srt <- do.call(
+          what = RunATACQC,
+          args = atac_args_use
+        )
+        atac_fail <- rep(FALSE, ncol(srt))
+        names(atac_fail) <- colnames(srt)
+        if (
+          !is.null(min_pct_reads_in_peaks) &&
+            "pct_reads_in_peaks" %in% colnames(srt@meta.data)
+        ) {
+          atac_fail <- atac_fail | srt$pct_reads_in_peaks < min_pct_reads_in_peaks
+        }
+        if (
+          !is.null(min_TSS_enrichment) &&
+            "TSS.enrichment" %in% colnames(srt@meta.data)
+        ) {
+          atac_fail <- atac_fail | srt$TSS.enrichment < min_TSS_enrichment
+        }
+        if (
+          !is.null(max_nucleosome_signal) &&
+            "nucleosome_signal" %in% colnames(srt@meta.data)
+        ) {
+          atac_fail <- atac_fail | srt$nucleosome_signal > max_nucleosome_signal
+        }
+        if (
+          !is.null(max_blacklist_ratio) &&
+            "blacklist_ratio" %in% colnames(srt@meta.data)
+        ) {
+          atac_fail <- atac_fail | (
+            !is.na(srt$blacklist_ratio) &
+              srt$blacklist_ratio > max_blacklist_ratio
+          )
+        }
+        atac_qc <- names(atac_fail)[atac_fail]
+      }
+    }
+
+    decontX_qc <- c()
+    if ("decontX" %in% qc_metrics) {
+      decontX_args_use <- decontX_args
+      if (!group.by_missing) {
+        decontX_args_use[["group.by"]] <- group.by
+      }
+      if (!decontX_batch_missing) {
+        decontX_args_use[["batch"]] <- decontX_batch
+      }
+      if (!decontX_background_missing) {
+        decontX_args_use[["background"]] <- decontX_background
+      }
+      if (!decontX_background_assay_missing) {
+        decontX_args_use[["background_assay"]] <- decontX_background_assay
+      }
+      if (!decontX_bg_batch_missing) {
+        decontX_args_use[["bg_batch"]] <- decontX_bg_batch
+      }
+      if (
+        !decontX_assay_name_missing ||
+          is.null(decontX_args_use[["assay_name"]])
+      ) {
+        decontX_args_use[["assay_name"]] <- decontX_assay_name_use
+      }
+      if (
+        !decontX_store_assay_missing ||
+          is.null(decontX_args_use[["store_assay"]])
+      ) {
+        decontX_args_use[["store_assay"]] <- decontX_store_assay_use
+      }
+      if (
+        !decontX_round_counts_missing ||
+          is.null(decontX_args_use[["round_counts"]])
+      ) {
+        decontX_args_use[["round_counts"]] <- decontX_round_counts_use
+      }
+      if (is.null(decontX_args_use[["seed"]])) {
+        decontX_args_use[["seed"]] <- seed
+      }
+      decontX_args_use[["object"]] <- srt
+      decontX_args_use[["assay"]] <- assay
+      decontX_args_use[["data_type"]] <- status
+      srt <- do.call(
+        what = RunDecontX,
+        args = decontX_args_use
+      )
+
+      if (!is.null(decontX_threshold)) {
+        decontX_qc <- colnames(srt)[which(
+          srt[["decontX_contamination", drop = TRUE]] > decontX_threshold
+        )]
+      }
+    }
+
+    assay_genes <- rownames(Seurat::GetAssay(srt, assay = assay))
+    counts_mat <- GetAssayData5(srt, assay = assay, layer = "counts")
+    for (rule_name in names(qc_features)) {
+      srt[[paste0("percent.", rule_name)]] <- cellqc_feature_percentage(
+        counts = counts_mat,
+        features = qc_features[[rule_name]][["features"]]
+      )
+    }
+    outlier_qc <- c()
+    for (n in 1:length(species)) {
+      if (n == 0) {
+        break
+      }
+      sp <- species[n]
+      prefix <- species_gene_prefix[n]
+      sp_genes <- assay_genes[grep(pattern = paste0("^", prefix), x = assay_genes)]
+      nCount <- srt[[paste0(
+        c(paste0("nCount_", assay), sp),
+        collapse = "."
+      )]] <- Matrix::colSums(
+        counts_mat[sp_genes, , drop = FALSE]
+      )
+      nFeature <- srt[[paste0(
+        c(paste0("nFeature_", assay), sp),
+        collapse = "."
+      )]] <- Matrix::colSums(
+        counts_mat[sp_genes, , drop = FALSE] >
+          0
+      )
+      percent.mito <- srt[[paste0(
+        c("percent.mito", sp),
+        collapse = "."
+      )]] <- Seurat::PercentageFeatureSet(
+        object = srt,
+        assay = assay,
+        pattern = paste0(
+          "(",
+          paste0("^", prefix, "-*", mito_pattern),
+          ")",
+          collapse = "|"
+        ),
+        features = mito_gene
+      )
+      percent.ribo <- srt[[paste0(
+        c("percent.ribo", sp),
+        collapse = "."
+      )]] <- Seurat::PercentageFeatureSet(
+        object = srt,
+        assay = assay,
+        pattern = paste0(
+          "(",
+          paste0("^", prefix, "-*", ribo_pattern),
+          ")",
+          collapse = "|"
+        ),
+        features = ribo_gene
+      )
+      if (!isTRUE(is_atac_assay)) {
+        hb_features_use <- if (!is.null(hb_gene)) {
+          intersect(hb_gene, sp_genes)
+        } else {
+          hb_pattern_use <- paste0(
+            "(",
+            paste0("^", prefix, "-*", hb_pattern),
+            ")",
+            collapse = "|"
+          )
+          assay_genes[grep(pattern = hb_pattern_use, x = assay_genes)]
+        }
+        if (n == 1 && "hb" %in% qc_metrics && length(hb_features_use) == 0) {
+          log_message(
+            "The hemoglobin feature definition did not match any assay features",
+            message_type = "error"
+          )
+        }
+        srt[[paste0(c("percent.hb", sp), collapse = ".")]] <-
+          cellqc_feature_percentage(
+            counts = counts_mat,
+            features = hb_features_use
+          )
+      }
+      percent.genome <- srt[[paste0(
+        c("percent.genome", sp),
+        collapse = "."
+      )]] <- Seurat::PercentageFeatureSet(
+        object = srt,
+        assay = assay,
+        pattern = paste0("^", prefix)
+      )
+
+      ribo.mito.ratio <- srt[[
+        paste0(c("percent.ribo", sp), collapse = "."),
+        drop = TRUE
+      ]] /
+        srt[[paste0(c("percent.mito", sp), collapse = "."), drop = TRUE]]
+      ribo.mito.ratio[is.na(ribo.mito.ratio)] <- 1
+      srt[[paste0(c("ribo.mito.ratio", sp), collapse = ".")]] <- ribo.mito.ratio
+
+      if (n == 1) {
+        if ("outlier" %in% qc_metrics) {
+          log10_nFeature <- srt[[paste0(
+            c(paste0("log10_nFeature_", assay), sp),
+            collapse = "."
+          )]] <- log10(nFeature)
+          log10_nCount <- srt[[paste0(
+            c(paste0("log10_nCount_", assay), sp),
+            collapse = "."
+          )]] <- log10(nCount)
+          log10_nCount[is.infinite(log10_nCount)] <- NA
+          log10_nFeature[is.infinite(log10_nFeature)] <- NA
+          mod <- stats::loess(log10_nFeature ~ log10_nCount)
+          pred <- stats::predict(
+            mod,
+            newdata = data.frame(log10_nCount = log10_nCount)
+          )
+          featurecount_dist <- srt[[paste0(
+            c("featurecount_dist", sp),
+            collapse = "."
+          )]] <- log10_nFeature - pred
+
+          var <- sapply(strsplit(outlier_threshold, ":"), function(x) x[[1]])
+          var_valid <- var %in%
+            colnames(srt@meta.data) |
+            sapply(var, FUN = function(x) exists(x, where = environment()))
+          if (any(!var_valid)) {
+            log_message(
+              "Variable {.val {names(var_valid)[!var_valid]}} is not found in the srt object",
+              message_type = "error"
+            )
+          }
+          outlier <- lapply(
+            strsplit(outlier_threshold, ":"),
+            function(m) {
+              colnames(srt)[is_outlier(
+                get(m[1]),
+                nmads = as.numeric(m[3]),
+                type = m[2]
+              )]
+            }
+          )
+          names(outlier) <- outlier_threshold
+          outlier_tb <- table(unlist(outlier))
+          outlier_qc <- c(
+            outlier_qc,
+            names(outlier_tb)[outlier_tb >= outlier_n]
+          )
+          for (nm in names(outlier)) {
+            srt[[make.names(nm)]] <- colnames(srt) %in% outlier[[nm]]
+          }
+        }
+      }
+    }
+
+    umi_qc <- gene_qc <- mito_qc <- ribo_qc <- hb_qc <-
+      ribo_mito_ratio_qc <- species_qc <- c()
+    if ("umi" %in% qc_metrics) {
+      umi_qc <- colnames(srt)[which(
+        srt[[
+          paste0(c(paste0("nCount_", assay), species[1]), collapse = "."),
+          drop = TRUE
+        ]] <
+          UMI_threshold
+      )]
+    }
+    if ("gene" %in% qc_metrics) {
+      gene_qc <- colnames(srt)[which(
+        srt[[
+          paste0(c(paste0("nFeature_", assay), species[1]), collapse = "."),
+          drop = TRUE
+        ]] <
+          gene_threshold
+      )]
+    }
+    if ("mito" %in% qc_metrics) {
+      mito_qc <- colnames(srt)[which(
+        srt[[
+          paste0(c("percent.mito", species[1]), collapse = "."),
+          drop = TRUE
+        ]] >
+          mito_threshold
+      )]
+    }
+    if ("ribo" %in% qc_metrics) {
+      ribo_qc <- colnames(srt)[which(
+        srt[[
+          paste0(c("percent.ribo", species[1]), collapse = "."),
+          drop = TRUE
+        ]] >
+          ribo_threshold
+      )]
+    }
+    if ("hb" %in% qc_metrics) {
+      hb_percent <- srt[[
+        paste0(c("percent.hb", species[1]), collapse = "."),
+        drop = TRUE
+      ]]
+      hb_qc <- colnames(srt)[which(
+        hb_percent < hb_range[1] |
+          hb_percent > hb_range[2]
+      )]
+    }
+    if ("ribo_mito_ratio" %in% qc_metrics) {
+      ribo_mito_ratio_qc <- colnames(srt)[which(
+        srt[[
+          paste0(c("ribo.mito.ratio", species[1]), collapse = "."),
+          drop = TRUE
+        ]] <
+          ribo_mito_ratio_range[1] |
+          srt[[
+            paste0(c("ribo.mito.ratio", species[1]), collapse = "."),
+            drop = TRUE
+          ]] >
+            ribo_mito_ratio_range[2]
+      )]
+    }
+    if ("species" %in% qc_metrics) {
+      species_qc <- colnames(srt)[which(
+        srt[[
+          paste0(c("percent.genome", species[1]), collapse = "."),
+          drop = TRUE
+        ]] <
+          species_percent
+      )]
+    }
+    feature_qc_cells <- setNames(
+      vector("list", length(active_qc_features)),
+      active_qc_features
+    )
+    for (rule_name in active_qc_features) {
+      feature_percent <- srt[[paste0("percent.", rule_name), drop = TRUE]]
+      feature_range <- qc_features[[rule_name]][["range"]]
+      feature_qc_cells[[rule_name]] <- colnames(srt)[which(
+        feature_percent < feature_range[1] |
+          feature_percent > feature_range[2]
+      )]
+    }
+
+    CellQC <- unique(
+      c(
+        db_qc,
+        atac_qc,
+        decontX_qc,
+        outlier_qc,
+        umi_qc,
+        gene_qc,
+        mito_qc,
+        ribo_qc,
+        hb_qc,
+        ribo_mito_ratio_qc,
+        species_qc,
+        unlist(feature_qc_cells, use.names = FALSE)
+      )
+    )
+    qc_summary <- c(
+      "{cli::symbol$record} Total cells: {.pkg {ntotal}}\n",
+      "{cli::symbol$circle_filled} {.pkg {ntotal - length(CellQC)}} cells remained\n",
+      "{cli::symbol$circle} {.pkg {length(CellQC)}} cells filtered out:\n",
+      if ("doublets" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(db_qc)}} potential doublets\n"
+      },
+      if ("atac" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(atac_qc)}} ATAC QC failed cells\n"
+      },
+      if ("decontX" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(decontX_qc)}} high-contamination cells\n"
+      },
+      if ("outlier" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(outlier_qc)}} outlier cells\n"
+      },
+      if ("umi" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(umi_qc)}} low-UMI cells\n"
+      },
+      if ("gene" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(gene_qc)}} low-gene cells\n"
+      },
+      if ("mito" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(mito_qc)}} high-mito cells\n"
+      },
+      if ("ribo" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(ribo_qc)}} high-ribo cells\n"
+      },
+      if ("hb" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(hb_qc)}} HB feature-QC outlier cells\n"
+      },
+      if ("ribo_mito_ratio" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(ribo_mito_ratio_qc)}} ribo_mito_ratio outlier cells\n"
+      },
+      if ("species" %in% qc_metrics) {
+        "{cli::symbol$circle}   {.pkg {length(species_qc)}} species-contaminated cells"
+      },
+      unname(vapply(active_qc_features, function(rule_name) {
+        paste0(
+          "{cli::symbol$circle}   ",
+          length(feature_qc_cells[[rule_name]]),
+          " ",
+          rule_name,
+          " feature-QC outlier cells\n"
+        )
+      }, character(1)))
+    )
+    qc_summary <- Filter(Negate(is.null), qc_summary)
+    do.call(
+      what = log_message,
+      args = c(
+        as.list(qc_summary),
+        message_type = "success"
+      )
+    )
+
+    qc_nm <- c(
+      if ("doublets" %in% qc_metrics) {
+        "db_qc"
+      },
+      if ("atac" %in% qc_metrics) {
+        "atac_qc"
+      },
+      if ("decontX" %in% qc_metrics) {
+        "decontX_qc"
+      },
+      if ("outlier" %in% qc_metrics) {
+        "outlier_qc"
+      },
+      if ("umi" %in% qc_metrics) {
+        "umi_qc"
+      },
+      if ("gene" %in% qc_metrics) {
+        "gene_qc"
+      },
+      if ("mito" %in% qc_metrics) {
+        "mito_qc"
+      },
+      if ("ribo" %in% qc_metrics) {
+        "ribo_qc"
+      },
+      if ("hb" %in% qc_metrics) {
+        "hb_qc"
+      },
+      if ("ribo_mito_ratio" %in% qc_metrics) {
+        "ribo_mito_ratio_qc"
+      },
+      if ("species" %in% qc_metrics) {
+        "species_qc"
+      },
+      "CellQC"
+    )
+    for (qc in qc_nm) {
+      srt[[qc]] <- ifelse(
+        colnames(srt) %in% get(qc),
+        "Fail",
+        "Pass"
+      )
+      srt[[qc]] <- factor(
+        srt[[qc, drop = TRUE]],
+        levels = c("Pass", "Fail")
+      )
+    }
+    feature_qc_nm <- paste0(active_qc_features, "_qc")
+    for (i_rule in seq_along(active_qc_features)) {
+      rule_name <- active_qc_features[[i_rule]]
+      qc_col <- feature_qc_nm[[i_rule]]
+      srt[[qc_col]] <- factor(
+        ifelse(
+          colnames(srt) %in% feature_qc_cells[[rule_name]],
+          "Fail",
+          "Pass"
+        ),
+        levels = c("Pass", "Fail")
+      )
+    }
+    qc_nm <- c(qc_nm, feature_qc_nm)
+
+    if (return_filtered) {
+      srt <- srt[, srt$CellQC == "Pass"]
+      srt@meta.data[, intersect(qc_nm, colnames(srt@meta.data))] <- NULL
+    }
+    srt_list[[i]] <- srt
+  }
+  cells <- unlist(lapply(srt_list, colnames))
+  srt_raw <- srt_raw[, cells]
+  meta.data <- do.call(
+    rbind.data.frame,
+    unname(lapply(srt_list, function(x) x@meta.data))
+  )
+  srt_raw <- Seurat::AddMetaData(
+    srt_raw,
+    metadata = meta.data
+  )
+
+  if ("decontX" %in% qc_metrics && isTRUE(decontX_store_assay_use)) {
+    decontX_assay_name <- decontX_assay_name_use
+    decontX_mats <- unname(lapply(srt_list, function(x) {
+      if (decontX_assay_name %in% SeuratObject::Assays(x)) {
+        GetAssayData5(
+          object = x,
+          assay = decontX_assay_name,
+          layer = "counts"
+        )
+      } else {
+        NULL
+      }
+    }))
+    decontX_mats <- Filter(Negate(is.null), decontX_mats)
+    if (length(decontX_mats) > 0) {
+      features_all <- unique(unlist(lapply(decontX_mats, rownames)))
+      decontX_mats <- lapply(decontX_mats, function(mat) {
+        if (identical(rownames(mat), features_all)) {
+          return(mat)
+        }
+        mat_full <- Matrix::Matrix(
+          0,
+          nrow = length(features_all),
+          ncol = ncol(mat),
+          sparse = TRUE
+        )
+        rownames(mat_full) <- features_all
+        colnames(mat_full) <- colnames(mat)
+        mat_full[rownames(mat), colnames(mat)] <- mat
+        mat_full
+      })
+      decontX_mat <- do.call(cbind, decontX_mats)
+      decontX_mat <- decontX_mat[, colnames(srt_raw), drop = FALSE]
+      srt_raw[[decontX_assay_name]] <- Seurat::CreateAssayObject(
+        counts = decontX_mat
+      )
+    }
+  }
+
+  if ("decontX" %in% qc_metrics) {
+    decontX_tools <- unname(lapply(srt_list, function(x) x@tools[["decontX"]]))
+    if (length(decontX_tools) == 1) {
+      srt_raw@tools[["decontX"]] <- decontX_tools[[1]]
+    } else if (length(decontX_tools) > 1) {
+      names(decontX_tools) <- names(srt_list)
+      srt_raw@tools[["decontX"]] <- decontX_tools
+    }
+  }
+  if ("doublets" %in% qc_metrics && "Scrublet" %in% db_method) {
+    scrublet_tools <- unname(lapply(srt_list, function(x) {
+      x@tools[["Scrublet"]]
+    }))
+    scrublet_tools <- Filter(Negate(is.null), scrublet_tools)
+    if (length(scrublet_tools) == 1) {
+      srt_raw@tools[["Scrublet"]] <- scrublet_tools[[1]]
+    } else if (length(scrublet_tools) > 1) {
+      names(scrublet_tools) <- names(srt_list)[seq_along(scrublet_tools)]
+      srt_raw@tools[["Scrublet"]] <- scrublet_tools
+    }
+  }
+
+  return(srt_raw)
+}
+
+cellqc_initialize_count_metrics <- function(srt, assay) {
+  ncount_col <- paste0("nCount_", assay)
+  nfeature_col <- paste0("nFeature_", assay)
+  need_ncount <- !ncount_col %in% colnames(srt@meta.data)
+  need_nfeature <- !nfeature_col %in% colnames(srt@meta.data)
+  if (need_ncount || need_nfeature) {
+    counts <- GetAssayData5(srt, assay = assay, layer = "counts")
+    if (need_ncount) {
+      srt@meta.data[[ncount_col]] <- Matrix::colSums(counts)
+    }
+    if (need_nfeature) {
+      srt@meta.data[[nfeature_col]] <- Matrix::colSums(counts > 0)
+    }
+  }
+  srt
+}
+
+cellqc_validate_range <- function(x, arg) {
+  if (
+    !is.numeric(x) ||
+      length(x) != 2 ||
+      anyNA(x) ||
+      x[[1]] > x[[2]]
+  ) {
+    log_message(
+      sprintf("%s must be a numeric vector of length two with lower <= upper", arg),
+      message_type = "error"
+    )
+  }
+  as.numeric(x)
+}
+
+cellqc_feature_percentage <- function(counts, features) {
+  totals <- Matrix::colSums(counts)
+  feature_totals <- Matrix::colSums(counts[features, , drop = FALSE])
+  percent <- numeric(length(totals))
+  nonzero <- totals > 0
+  percent[nonzero] <- feature_totals[nonzero] / totals[nonzero] * 100
+  names(percent) <- colnames(counts)
+  percent
+}

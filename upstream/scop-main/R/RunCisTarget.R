@@ -1,0 +1,546 @@
+#' @title Run cisTarget motif enrichment on a GRN adjacency table
+#'
+#' @description
+#' cisTarget performs motif enrichment analysis on gene regulatory network
+#' adjacency tables. For each transcription factor, it identifies target
+#' genes whose regulatory regions are enriched for the TF's binding motifs,
+#' producing regulons (TF + enriched target gene sets).
+#'
+#' @md
+#' @inheritParams RunSCENIC
+#' @param adj A data frame with columns `TF`, `target`, and optionally
+#' `importance`, or a path to a TSV adjacency file. This is typically the
+#' output of [RunGRNBoost2()], [RunGENIE3()], or [RunSCENIC()] step 1.
+#' @param backend CisTarget runtime backend.
+#' \describe{
+#'   \item{`"python"`}{Uses the pySCENIC/ctxcore Python pipeline. This is the
+#'     most tested backend and produces results identical to official SCENIC.}
+#'   \item{`"cpp"`}{Uses a compiled cisTarget workflow with recovery, AUC/NES,
+#'     and leading-edge kernels while retaining the same ranking
+#'     database and motif annotation inputs.}
+#'   \item{`"r"`}{Uses the `RcisTarget` Bioconductor package. Requires the
+#'     cisTarget ranking databases and motif annotations to be available in
+#'     the same format as the Python backend (feather files and motif2tf
+#'     table).}
+#' }
+#' @param ranking_dbs Character vector of cisTarget ranking feather files.
+#' @param motif_annotations Motif annotation table path (motif2tf).
+#' @param expression_mtx Optional expression matrix path (CSV). When
+#' `NULL` and `backend = "python"`, the expression matrix is reconstructed
+#' from the unique genes in `adj` as a minimal stub.
+#' @param ctx_output Optional output file path for the cisTarget result.
+#' @param min_regulon_size Minimum number of target genes per regulon.
+#' @param gmt_output Optional output path for the regulon GMT file.
+#' @param txt_output Optional output path for the regulon TXT file.
+#' @param work_dir Working directory used by Python backend.
+#' @param prefix Prefix for output files.
+#' @param envname Python environment name (Python backend only).
+#' @param conda Conda-compatible executable (Python backend only).
+#' @param cores Number of workers.
+#' @param force Whether to rebuild existing outputs.
+#' @param verbose Whether to print progress messages.
+#' @param ... Additional arguments passed to the backend.
+#'
+#' @return A named list with components `regulons` (list of gene vectors),
+#' `ctx_file` (path to raw cisTarget output), `gmt_file`, and `txt_file`.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#'
+#' # First run GRN inference
+#' grn <- RunGRNBoost2(
+#'   pancreas_sub,
+#'   regulators = c("Neurod1", "Arx", "Pax6"),
+#'   backend = "cpp"
+#' )
+#'
+#' # Then run cisTarget (Python backend)
+#' regulons <- RunCisTarget(
+#'   grn,
+#'   species = "Mus_musculus",
+#'   backend = "python"
+#' )
+#' }
+RunCisTarget <- function(
+  adj,
+  species = c("Homo_sapiens", "Mus_musculus", "Drosophila_melanogaster"),
+  backend = c("python", "cpp", "r"),
+  ranking_dbs = NULL,
+  motif_annotations = NULL,
+  expression_mtx = NULL,
+  ctx_output = NULL,
+  min_regulon_size = 10,
+  gmt_output = NULL,
+  txt_output = NULL,
+  work_dir = NULL,
+  prefix = "cisTarget",
+  data_dir = NULL,
+  envname = NULL,
+  conda = "auto",
+  cores = 1,
+  parallel_backend = c("auto", "psock", "fork"),
+  force = FALSE,
+  verbose = TRUE,
+  ...
+) {
+  backend <- match.arg(backend)
+  parallel_backend <- match.arg(parallel_backend)
+  species <- match.arg(species)
+
+  work_dir <- work_dir %||% "."
+  if (!dir.exists(work_dir)) {
+    dir.create(work_dir, recursive = TRUE, showWarnings = FALSE)
+  }
+
+  reference_data <- scenic_reference(
+    species = species,
+    data_dir = data_dir,
+    ranking_dbs = ranking_dbs,
+    motif_annotations = motif_annotations,
+    verbose = verbose
+  )
+  ranking_dbs <- reference_data[["ranking_dbs"]]
+  motif_annotations <- reference_data[["motif_annotations"]]
+
+  if (is.character(adj) && length(adj) == 1 && file.exists(adj)) {
+    adj_file <- adj
+    adj <- utils::read.table(
+      adj_file,
+      header = TRUE, sep = "\t", stringsAsFactors = FALSE
+    )
+  } else if (is.data.frame(adj)) {
+    adj_file <- file.path(work_dir, paste0(prefix, "_adj.tsv"))
+    utils::write.table(
+      adj, adj_file,
+      sep = "\t", row.names = FALSE, quote = FALSE
+    )
+  } else {
+    log_message(
+      "{.arg adj} must be a data.frame or a path to a TSV file",
+      message_type = "error"
+    )
+  }
+
+  required_cols <- c("TF", "target")
+  missing_cols <- setdiff(required_cols, colnames(adj))
+  if (length(missing_cols) > 0) {
+    log_message(
+      "{.arg adj} missing required columns: {.val {missing_cols}}",
+      message_type = "error"
+    )
+  }
+  if (!"importance" %in% colnames(adj)) {
+    adj[["importance"]] <- 1
+    adj_file <- file.path(work_dir, paste0(prefix, "_adj.tsv"))
+    utils::write.table(
+      adj, adj_file,
+      sep = "\t", row.names = FALSE, quote = FALSE
+    )
+  }
+
+  ctx_output <- ctx_output %||% file.path(
+    work_dir, paste0(prefix, "_ctx.csv")
+  )
+  gmt_output <- gmt_output %||% file.path(
+    work_dir, paste0(prefix, "_regulons.gmt")
+  )
+  txt_output <- txt_output %||% file.path(
+    work_dir, paste0(prefix, "_regulons.txt")
+  )
+
+  switch(backend,
+    python = cisTarget_python(
+      adj = adj,
+      adj_file = adj_file,
+      ranking_dbs = ranking_dbs,
+      motif_annotations = motif_annotations,
+      expression_mtx = expression_mtx,
+      ctx_output = ctx_output,
+      gmt_output = gmt_output,
+      txt_output = txt_output,
+      min_regulon_size = min_regulon_size,
+      work_dir = work_dir,
+      prefix = prefix,
+      envname = envname,
+      conda = conda,
+      cores = cores,
+      force = force,
+      verbose = verbose,
+      ...
+    ),
+    cpp = cisTarget_cpp(
+      adj = adj,
+      ranking_dbs = ranking_dbs,
+      motif_annotations = motif_annotations,
+      expression_mtx = expression_mtx,
+      ctx_output = ctx_output,
+      gmt_output = gmt_output,
+      txt_output = txt_output,
+      min_regulon_size = min_regulon_size,
+      cores = cores,
+      parallel_backend = parallel_backend,
+      force = force,
+      verbose = verbose,
+      ...
+    ),
+    r = cisTarget_r(
+      adj = adj,
+      ranking_dbs = ranking_dbs,
+      motif_annotations = motif_annotations,
+      ctx_output = ctx_output,
+      gmt_output = gmt_output,
+      txt_output = txt_output,
+      min_regulon_size = min_regulon_size,
+      cores = cores,
+      force = force,
+      verbose = verbose,
+      ...
+    )
+  )
+}
+
+
+cisTarget_cpp <- function(
+  adj,
+  ranking_dbs,
+  motif_annotations,
+  expression_mtx,
+  ctx_output,
+  gmt_output,
+  txt_output,
+  min_regulon_size,
+  cores,
+  parallel_backend,
+  force,
+  verbose,
+  ...
+) {
+  if (
+    !isTRUE(force) &&
+      file.exists(ctx_output) &&
+      file.exists(gmt_output) &&
+      file.exists(txt_output)
+  ) {
+    return(list(
+      regulons = read_regulons_from_gmt(gmt_output, min_regulon_size),
+      ctx_file = ctx_output,
+      gmt_file = gmt_output,
+      txt_file = txt_output
+    ))
+  }
+  if (is.data.frame(motif_annotations)) {
+    motif_file <- tempfile("scop_motif_annotations_", fileext = ".tsv")
+    utils::write.table(
+      motif_annotations,
+      motif_file,
+      sep = "\t",
+      row.names = FALSE,
+      quote = FALSE
+    )
+    motif_annotations <- motif_file
+  }
+  expr_mtx <- if (is.null(expression_mtx)) {
+    NULL
+  } else if (is.character(expression_mtx) && length(expression_mtx) == 1L) {
+    as.matrix(utils::read.csv(
+      expression_mtx,
+      row.names = 1,
+      check.names = FALSE
+    ))
+  } else {
+    as.matrix(expression_mtx)
+  }
+  args <- c(
+    list(
+      adjacency = adj,
+      expr_mtx = expr_mtx,
+      ranking_dbs = ranking_dbs,
+      motif_annotations = motif_annotations,
+      min_regulon_size = as.integer(min_regulon_size),
+      cores = as.integer(cores),
+      parallel_backend = parallel_backend,
+      verbose = verbose
+    ),
+    list(...)
+  )
+  regulons <- do.call(cistarget2, args)
+  regulons <- regulons[lengths(regulons) >= min_regulon_size]
+  write_regulons_file(regulons, gmt_output, sep = "\t")
+  write_regulons_file(regulons, txt_output, sep = ",")
+
+  ctx <- if (length(regulons) == 0L) {
+    data.frame(
+      regulon = character(),
+      target = character(),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    do.call(rbind, lapply(names(regulons), function(regulon) {
+      data.frame(
+        regulon = regulon,
+        target = regulons[[regulon]],
+        stringsAsFactors = FALSE
+      )
+    }))
+  }
+  utils::write.csv(ctx, ctx_output, row.names = FALSE)
+  log_message(
+    "{.fn RunCisTarget} (cpp) produced {.val {length(regulons)}} regulons",
+    message_type = "success",
+    verbose = verbose
+  )
+  list(
+    regulons = regulons,
+    ctx_file = ctx_output,
+    gmt_file = gmt_output,
+    txt_file = txt_output
+  )
+}
+
+
+cisTarget_python <- function(
+  adj,
+  adj_file,
+  ranking_dbs,
+  motif_annotations,
+  expression_mtx,
+  ctx_output,
+  gmt_output,
+  txt_output,
+  min_regulon_size,
+  work_dir,
+  prefix,
+  envname,
+  conda,
+  cores,
+  force,
+  verbose,
+  ...
+) {
+  envname <- envname %||% "scenic_env"
+  PrepareEnv(
+    envname = envname,
+    conda = conda,
+    modules = "scenic",
+    verbose = verbose
+  )
+  check_python(
+    packages = grn_python_packages("grnboost2"),
+    envname = envname,
+    conda = conda,
+    verbose = verbose
+  )
+  conda_resolved <- resolve_conda(conda)
+  python_path <- conda_python(conda = conda_resolved, envname = envname)
+  assert_python_runtime_switchable(
+    python_path,
+    restart_hint = scenic_runtime_restart_hint(envname = envname)
+  )
+  configure_python_runtime(python_path)
+
+  functions <- scop_python_import("functions", convert = TRUE)
+
+  if (is.null(expression_mtx)) {
+    expr_csv <- file.path(work_dir, paste0(prefix, "_expr.csv"))
+    all_genes <- unique(unlist(lapply(adj, function(col) {
+      if (is.character(col) || is.factor(col)) as.character(col) else NULL
+    })))
+    all_genes <- all_genes[nzchar(all_genes) & !is.na(all_genes)]
+    n_cells <- min(3L, length(all_genes))
+    stub <- as.data.frame(matrix(
+      1.0,
+      nrow = length(all_genes),
+      ncol = n_cells,
+      dimnames = list(all_genes, paste0("Cell", seq_len(n_cells)))
+    ))
+    utils::write.csv(stub, expr_csv)
+    expression_mtx <- expr_csv
+  }
+
+  if (is.data.frame(motif_annotations)) {
+    motif_file <- file.path(work_dir, paste0(prefix, "_motif2tf.tbl"))
+    utils::write.table(
+      motif_annotations, motif_file,
+      sep = "\t", row.names = FALSE, quote = FALSE
+    )
+    motif_annotations <- motif_file
+  }
+
+  log_message(
+    "Running cisTarget (Python ctxcore) on {.val {nrow(adj)}} edges...",
+    verbose = verbose
+  )
+
+  functions$RunSCENICCtx(
+    expression_mtx = expression_mtx,
+    ranking_dbs = as.list(ranking_dbs),
+    motif_annotations = motif_annotations,
+    adj_output = adj_file,
+    ctx_output = ctx_output,
+    cores = as.integer(cores),
+    force = isTRUE(force),
+    verbose = isTRUE(verbose)
+  )
+
+  functions$SCENICRegulonsToFiles(
+    ctx_output,
+    gmt_output,
+    txt_output,
+    min_regulon_size = as.integer(min_regulon_size)
+  )
+
+  regulons <- read_regulons_from_gmt(gmt_output, min_regulon_size)
+
+  log_message(
+    "{.fn RunCisTarget} (python) produced {.val {length(regulons)}} regulons",
+    message_type = "success",
+    verbose = verbose
+  )
+
+  list(
+    regulons = regulons,
+    ctx_file = ctx_output,
+    gmt_file = gmt_output,
+    txt_file = txt_output
+  )
+}
+
+
+cisTarget_r <- function(
+  adj,
+  ranking_dbs,
+  motif_annotations,
+  ctx_output,
+  gmt_output,
+  txt_output,
+  min_regulon_size,
+  cores,
+  force,
+  verbose,
+  ...
+) {
+  check_r("RcisTarget", verbose = FALSE)
+  importRankings <- get_namespace_fun("RcisTarget", "importRankings")
+  cisTarget <- get_namespace_fun("RcisTarget", "cisTarget")
+
+  log_message(
+    "Running cisTarget (RcisTarget) on {.val {nrow(adj)}} edges...",
+    verbose = verbose
+  )
+
+  motif_annotations_dt <- data.table::fread(motif_annotations)
+
+  db_paths <- ranking_dbs
+  if (length(db_paths) > 1) {
+    log_message(
+      "RcisTarget does not natively support multiple ranking databases. Using first: {.file {db_paths[1]}}",
+      message_type = "warning",
+      verbose = verbose
+    )
+  }
+
+  tf_targets <- split(adj[["target"]], adj[["TF"]])
+  tf_targets <- lapply(tf_targets, unique)
+
+  motif_rankings <- tryCatch(
+    importRankings(db_paths[1]),
+    error = function(e) {
+      log_message(
+        "Failed to import rankings: {.val {conditionMessage(e)}}",
+        message_type = "error"
+      )
+    }
+  )
+
+  motif_enrichment <- cisTarget(
+    tf_targets,
+    motif_rankings,
+    motifAnnot = motif_annotations_dt,
+    nCores = as.integer(cores),
+    ...
+  )
+
+  regulons <- list()
+  if (is.data.frame(motif_enrichment)) {
+    for (tf_name in unique(motif_enrichment[["geneSet"]])) {
+      enriched <- motif_enrichment[motif_enrichment[["geneSet"]] == tf_name, , drop = FALSE]
+      if (!nrow(enriched)) {
+        next
+      }
+      top_row <- enriched[which.max(enriched[["NES"]]), , drop = FALSE]
+      target_genes <- unique(unlist(strsplit(top_row[["enrichedGenes"]], ";")))
+      target_genes <- target_genes[nzchar(target_genes)]
+      if (length(target_genes) >= min_regulon_size) {
+        regulons[[scenic_regulon_name(tf_name, suffix = "(+)")]] <-
+          target_genes
+      }
+    }
+  } else {
+    for (tf_name in names(motif_enrichment)) {
+      enriched <- motif_enrichment[[tf_name]]
+      if (is.null(enriched) || nrow(enriched) == 0) {
+        next
+      }
+      top_row <- enriched[which.max(enriched[["NES"]]), ]
+      target_genes <- unique(unlist(strsplit(top_row[["enrichedGenes"]], ";")))
+      target_genes <- target_genes[nzchar(target_genes)]
+      if (length(target_genes) >= min_regulon_size) {
+        regulons[[scenic_regulon_name(tf_name, suffix = "(+)")]] <-
+          target_genes
+      }
+    }
+  }
+
+  write_regulons_file(regulons, gmt_output, sep = "\t")
+  write_regulons_file(regulons, txt_output, sep = ",")
+
+  log_message(
+    "{.fn RunCisTarget} (r) produced {.val {length(regulons)}} regulons",
+    message_type = "success",
+    verbose = verbose
+  )
+
+  list(
+    regulons = regulons,
+    ctx_file = ctx_output,
+    gmt_file = gmt_output,
+    txt_file = txt_output
+  )
+}
+
+
+read_regulons_from_gmt <- function(gmt_file, min_regulon_size = 10) {
+  if (!file.exists(gmt_file)) {
+    return(list())
+  }
+  lines <- readLines(gmt_file, warn = FALSE)
+  regulons <- list()
+  for (line in lines) {
+    parts <- strsplit(line, "\t")[[1]]
+    if (length(parts) < 3) next
+    tf_name <- gsub("\\(\\d+g\\)$", "", parts[1])
+    genes <- parts[-(1:2)]
+    genes <- genes[nzchar(genes)]
+    if (length(genes) >= min_regulon_size) {
+      regulons[[tf_name]] <- genes
+    }
+  }
+  regulons
+}
+
+
+write_regulons_file <- function(regulons, file, sep = "\t") {
+  lines <- character(length(regulons))
+  for (i in seq_along(regulons)) {
+    tf <- names(regulons)[i]
+    genes <- regulons[[i]]
+    lines[i] <- paste0(
+      tf, "(", length(genes), "g)", "\tna\t",
+      paste(genes, collapse = sep)
+    )
+  }
+  writeLines(lines, file)
+}

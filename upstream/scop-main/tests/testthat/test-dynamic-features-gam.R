@@ -1,0 +1,172 @@
+test_that("dynamic_features_gam preserves failed feature slots", {
+  if (identical(Sys.info()[["sysname"]], "Darwin") && getRversion() >= "4.6.0") {
+    skip("mgcv can segfault while loading on macOS ARM with R >= 4.6")
+  }
+  skip_if_not_installed("mgcv")
+
+  cells <- paste0("cell", seq_len(30))
+  t_ordered <- stats::setNames(seq(0, 1, length.out = length(cells)), cells)
+  y_ordered <- rbind(
+    good = 1 + sin(t_ordered * pi),
+    partial = 1 + cos(t_ordered * pi),
+    bad = rep(NA_real_, length(cells))
+  )
+  y_ordered["partial", c(3, 12)] <- NA_real_
+  y_ordered["partial", 20] <- Inf
+  colnames(y_ordered) <- cells
+  family <- c(good = "gaussian", partial = "gaussian", bad = "gaussian")
+  y_libsize <- stats::setNames(rep(1, length(cells)), cells)
+
+  shared <- thisutils::fit_trends(
+    y_ordered, t_ordered,
+    method = "gam", family = family,
+    exposure = y_libsize, verbose = FALSE
+  )
+  out <- list(
+    fitted_matrix = cbind(pseudotime = t_ordered, t(shared$fitted)),
+    DynamicFeatures = shared$statistics
+  )
+
+  expect_equal(
+    colnames(out$fitted_matrix),
+    c("pseudotime", "good", "partial", "bad")
+  )
+  expect_equal(rownames(out$DynamicFeatures), c("good", "partial", "bad"))
+  expect_false(all(is.na(out$fitted_matrix[, "partial"])))
+  expect_false(is.na(out$DynamicFeatures["partial", "pvalue"]))
+  expect_true(all(is.na(out$fitted_matrix[, "bad"])))
+  expect_true(is.na(out$DynamicFeatures["bad", "pvalue"]))
+})
+
+test_that("dynamic feature sparse row unique counts match dense apply", {
+  sparse <- Matrix::Matrix(
+    c(
+      0, 1, 1, 2,
+      0, 0, 0, 0,
+      3, 0, 3, 4
+    ),
+    nrow = 3,
+    byrow = TRUE,
+    sparse = TRUE
+  )
+  rownames(sparse) <- paste0("gene", seq_len(nrow(sparse)))
+  dense_counts <- apply(as.matrix(sparse), 1, function(row) length(unique(row)))
+
+  expect_equal(dynamic_row_unique_counts(sparse), dense_counts)
+  expect_equal(dynamic_row_unique_counts(as.matrix(sparse)), dense_counts)
+})
+
+test_that("dynamic feature row unique counts preserve special numeric values", {
+  mat <- matrix(
+    c(
+      0, NA_real_, NaN, Inf,
+      -0, 0, -Inf, NA_real_,
+      2, 2, 2, 2
+    ),
+    nrow = 3,
+    byrow = TRUE,
+    dimnames = list(paste0("gene", 1:3), NULL)
+  )
+
+  expected <- apply(mat, 1, function(row) length(unique(row)))
+  expect_equal(dynamic_row_unique_counts(mat), expected)
+  expect_equal(dynamic_row_unique_counts(Matrix::Matrix(mat, sparse = TRUE)), expected)
+})
+
+test_that("dynamic feature sparse row unique counts retain explicit-zero semantics", {
+  sparse <- methods::new(
+    "dgCMatrix",
+    i = as.integer(c(0, 0)),
+    p = as.integer(c(0, 1, 2, 2)),
+    Dim = as.integer(c(1, 3)),
+    x = c(0, 1),
+    Dimnames = list("gene1", paste0("cell", 1:3))
+  )
+  legacy <- function(x) {
+    x <- methods::as(x, "TsparseMatrix")
+    out <- integer(nrow(x))
+    values <- split(x@x, x@i + 1L)
+    out[as.integer(names(values))] <- vapply(values, function(v) {
+      length(unique(v))
+    }, integer(1))
+    out <- out + as.integer(tabulate(x@i + 1L, nbins = nrow(x)) < ncol(x))
+    names(out) <- rownames(x)
+    out
+  }
+
+  expect_equal(dynamic_row_unique_counts(sparse), legacy(sparse))
+})
+
+test_that("dynamic raw matrix matches legacy construction", {
+  t_ordered <- stats::setNames(c(0.2, 0.5, 0.9), paste0("cell", 1:3))
+  y_ordered <- matrix(
+    c(1, 2, 3, 4, 5, 6),
+    nrow = 2,
+    byrow = TRUE,
+    dimnames = list(c("geneA", "geneB"), names(t_ordered))
+  )
+  legacy <- as.matrix(
+    cbind(
+      data.frame(pseudotime = t_ordered),
+      Matrix::t(y_ordered)
+    )
+  )
+
+  expect_equal(dynamic_raw_matrix(y_ordered, t_ordered), legacy)
+})
+
+test_that("RunDynamicFeatures accepts custom library sizes for counts", {
+  if (identical(Sys.info()[["sysname"]], "Darwin") && getRversion() >= "4.6.0") {
+    skip("mgcv can segfault while loading on macOS ARM with R >= 4.6")
+  }
+  skip_if_not_installed("mgcv")
+
+  cells <- paste0("cell", seq_len(24))
+  counts <- Matrix::Matrix(
+    rbind(Gene1 = seq_len(24), Gene2 = rev(seq_len(24))),
+    sparse = TRUE
+  )
+  colnames(counts) <- cells
+  srt <- Seurat::CreateSeuratObject(counts)
+  srt$Lineage1 <- seq(0, 1, length.out = ncol(srt))
+
+  expect_no_error(
+    RunDynamicFeatures(
+      srt,
+      lineages = "Lineage1",
+      features = "Gene1",
+      libsize = rep(1, ncol(srt)),
+      verbose = FALSE
+    )
+  )
+})
+
+test_that("RunDynamicFeatures ignores unusable library sizes outside a lineage", {
+  if (identical(Sys.info()[["sysname"]], "Darwin") && getRversion() >= "4.6.0") {
+    skip("mgcv can segfault while loading on macOS ARM with R >= 4.6")
+  }
+  skip_if_not_installed("mgcv")
+
+  cells <- paste0("cell", seq_len(24))
+  counts <- Matrix::Matrix(
+    rbind(Gene1 = seq_len(24)),
+    sparse = TRUE
+  )
+  colnames(counts) <- cells
+  srt <- Seurat::CreateSeuratObject(counts)
+  srt$Lineage1 <- c(seq(0, 1, length.out = 12), rep(NA_real_, 12))
+  srt$score <- rep(c(1, 3, 2, 5, 4, 6, 5, 8, 7, 9, 8, 10), 2)
+  custom_libsize <- rep(1, ncol(srt))
+  custom_libsize[24] <- NA_real_
+
+  out <- RunDynamicFeatures(
+    srt,
+    lineages = "Lineage1",
+    features = "score",
+    family = "gaussian",
+    libsize = custom_libsize,
+    verbose = FALSE
+  )
+  fitted <- out@tools[["DynamicFeatures_Lineage1"]]$fitted_matrix[, "score"]
+  expect_equal(sum(is.finite(fitted)), 12)
+})

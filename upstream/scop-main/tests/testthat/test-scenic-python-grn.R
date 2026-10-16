@@ -1,0 +1,61 @@
+test_that("Python SCENIC GRNBoost2 runs through local Dask cluster", {
+  skip_if(
+    identical(Sys.info()[["sysname"]], "Darwin"),
+    "reticulate Python discovery is unstable on macOS CI"
+  )
+  skip_if_not_installed("reticulate")
+  skip_if_not(reticulate::py_module_available("arboreto"))
+  skip_if_not(reticulate::py_module_available("distributed"))
+
+  functions <- scop_python_import("functions", convert = TRUE)
+
+  tmp_dir <- tempfile("scenic-python-grn-")
+  dir.create(tmp_dir)
+  expr_file <- file.path(tmp_dir, "expression.csv")
+  regulators_file <- file.path(tmp_dir, "regulators.txt")
+  adj_file <- file.path(tmp_dir, "adj.tsv")
+
+  expr <- data.frame(
+    TF1 = c(1, 2, 3, 4, 5, 6),
+    TF2 = c(6, 5, 4, 3, 2, 1),
+    Gene1 = c(1, 1, 2, 3, 5, 8),
+    Gene2 = c(8, 5, 3, 2, 1, 1),
+    Gene3 = c(0, 1, 0, 1, 0, 1),
+    row.names = paste0("Cell", seq_len(6)),
+    check.names = FALSE
+  )
+  utils::write.csv(expr, expr_file)
+  writeLines(c("TF1", "TF2"), regulators_file)
+
+  functions$RunSCENICGrn(
+    expression_mtx = expr_file,
+    regulators = regulators_file,
+    adj_output = adj_file,
+    n_rounds = 10L,
+    early_stop_window_length = 5L,
+    cores = 1L,
+    seed = 1234L,
+    force = TRUE,
+    verbose = FALSE
+  )
+
+  expect_true(file.exists(adj_file))
+  adj <- utils::read.delim(adj_file, stringsAsFactors = FALSE)
+  expect_true(all(c("TF", "target", "importance") %in% colnames(adj)))
+  expect_gt(nrow(adj), 0)
+})
+
+test_that("Python SCENIC GRNBoost2 configures process workers for multicore runs", {
+  functions_file <- c(
+    system.file("python", "functions.py", package = "scop", mustWork = FALSE),
+    file.path("inst", "python", "functions.py"),
+    file.path(testthat::test_path("..", ".."), "inst", "python", "functions.py")
+  )
+  functions_file <- functions_file[nzchar(functions_file) & file.exists(functions_file)][1]
+  skip_if(is.na(functions_file), "SCENIC Python helper file is not available")
+  source <- paste(readLines(functions_file, warn = FALSE), collapse = "\n")
+
+  expect_match(source, "\"n_workers\": cores", fixed = TRUE)
+  expect_match(source, "\"threads_per_worker\": 1", fixed = TRUE)
+  expect_match(source, "\"processes\": True", fixed = TRUE)
+})

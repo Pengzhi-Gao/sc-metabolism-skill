@@ -1,0 +1,1088 @@
+make_scenic_plot_mock <- function(seed = 1, add_embedding = FALSE) {
+  set.seed(seed)
+  counts <- Matrix::Matrix(matrix(
+    stats::rpois(8 * 12, lambda = 5),
+    nrow = 8,
+    ncol = 12,
+    dimnames = list(
+      c("Gene1", "Gene2", "TF1", "TF2", "TF3", "TF4", "TF5", "TF6"),
+      paste0("Cell", seq_len(12))
+    )
+  ), sparse = TRUE)
+  counts[1, ] <- seq_len(ncol(counts))
+  counts[2, ] <- rev(seq_len(ncol(counts)))
+  srt <- Seurat::CreateSeuratObject(counts = counts)
+  srt$CellType <- rep(c("A", "B", "C"), each = 4)
+
+  auc <- matrix(
+    stats::runif(6 * 12),
+    nrow = 6,
+    ncol = 12,
+    dimnames = list(
+      paste0(c("TF1", "TF2", "TF3", "TF4", "TF5", "TF6"), "(+)"),
+      colnames(srt)
+    )
+  )
+  srt@tools$SCENIC <- list(
+    scores_cells_by_regulon = t(auc),
+    regulon_list = list(
+      `TF1(+)` = c("Gene1", "Gene2", "TF2"),
+      `TF2(+)` = c("Gene1", "TF3"),
+      `TF3(+)` = c("Gene2", "TF4"),
+      `TF4(+)` = c("Gene1", "TF5"),
+      `TF5(+)` = c("TF4", "TF6"),
+      `TF6(+)` = c("Gene2")
+    ),
+    adjacency = data.frame(
+      TF = c("TF1", "TF1", "TF2", "TF3", "TF4", "TF5", "TF6"),
+      target = c("Gene1", "Gene2", "TF3", "TF4", "TF5", "TF6", "Gene2"),
+      importance = c(5, 4, 3, 2.5, 2, 3.5, 1),
+      stringsAsFactors = FALSE
+    )
+  )
+  if (isTRUE(add_embedding)) {
+    emb <- cbind(
+      UMAP_1 = as.numeric(as.integer(factor(srt$CellType))),
+      UMAP_2 = seq_len(ncol(srt)) / ncol(srt)
+    )
+    rownames(emb) <- colnames(srt)
+    srt[["umap"]] <- Seurat::CreateDimReducObject(
+      embeddings = emb,
+      key = "UMAP_",
+      assay = "RNA"
+    )
+  }
+  list(srt = srt, auc = auc)
+}
+
+make_scenicplus_plot_mock <- function(seed = 11) {
+  dat <- make_scenic_plot_mock(seed = seed, add_embedding = TRUE)
+  regulons <- c("TF1(+)", "TF2(+)", "TF5(+)")
+  auc <- dat$auc[regulons, , drop = FALSE]
+  scores <- Matrix::Matrix(auc, sparse = TRUE)
+  regulon_list <- list(
+    `TF1(+)` = c("Gene1", "Gene2", "TF2"),
+    `TF2(+)` = c("Gene1", "TF3"),
+    `TF5(+)` = c("TF4", "TF6")
+  )
+  tf_gene <- data.frame(
+    TF = c("TF1", "TF1", "TF2", "TF5"),
+    target = c("Gene1", "Gene2", "Gene1", "TF4"),
+    importance = c(4, 3, 2, 5),
+    stringsAsFactors = FALSE
+  )
+  peak_names <- c(
+    "chr1-1000000-1000499",
+    "chr1-1002000-1002499",
+    "chr1-1004000-1004499",
+    "chr1-1008000-1008499",
+    "chr1-1012000-1012499"
+  )
+  triplets <- data.frame(
+    TF = c("TF1", "TF1", "TF1", "TF5"),
+    region = peak_names[c(1, 2, 3, 5)],
+    gene = c("Gene1", "Gene1", "Gene2", "TF4"),
+    score = c(0.8, 0.6, 0.5, 0.9),
+    stringsAsFactors = FALSE
+  )
+  region_gene <- triplets[, c("region", "gene", "score", "TF")]
+  region_auc <- auc
+  region_auc[] <- region_auc[] * 0.7
+  dat$srt[["scenicplus"]] <- Seurat::CreateAssayObject(counts = as.matrix(auc))
+  peak_counts <- matrix(
+    stats::rpois(length(peak_names) * ncol(dat$srt), lambda = 4),
+    nrow = length(peak_names),
+    ncol = ncol(dat$srt),
+    dimnames = list(peak_names, colnames(dat$srt))
+  )
+  peak_counts[1:3, dat$srt$CellType == "A"] <- peak_counts[1:3, dat$srt$CellType == "A"] + 8
+  chromatin <- Signac::CreateChromatinAssay(
+    counts = Matrix::Matrix(peak_counts, sparse = TRUE),
+    sep = c("-", "-")
+  )
+  dat$srt[["peaks"]] <- chromatin
+  dat$srt@tools$SCENICPlus <- list(
+    scores = scores,
+    auc = t(as.matrix(auc)),
+    regulon_list = regulon_list,
+    tf_gene = tf_gene,
+    triplets = triplets,
+    region_gene = region_gene,
+    auc_regions = region_auc
+  )
+  dat$srt@tools$SCENIC <- NULL
+  list(srt = dat$srt, auc = auc, regulons = regulons)
+}
+
+test_that("SCENIC row scaling matches the legacy apply standard deviations", {
+  mat <- rbind(
+    c(1, 2, 3, 4),
+    c(4, NA, 6, 8),
+    c(5, 5, 5, 5),
+    c(NA, NA, NA, NA)
+  )
+  rownames(mat) <- paste0("Regulon", seq_len(nrow(mat)))
+  old_scale <- function(x) {
+    means <- rowMeans(x, na.rm = TRUE)
+    sds <- apply(x, 1, stats::sd, na.rm = TRUE)
+    variable <- is.finite(sds) & sds > sqrt(.Machine$double.eps)
+    out <- x
+    if (any(variable)) {
+      out[variable, ] <- sweep(sweep(x[variable, , drop = FALSE], 1, means[variable], "-"), 1, sds[variable], "/")
+    }
+    if (any(!variable)) out[!variable, ] <- 0
+    attr(out, "constant_rows") <- rownames(x)[!variable]
+    out
+  }
+
+  expect_equal(scenic_scale_rows(mat), old_scale(mat), tolerance = 1e-12)
+})
+
+test_that("SCENIC group heatmap order matches legacy row-wise maxima", {
+  mat <- rbind(
+    RegulonA = c(A = 0.8, B = 0.8, C = 0.2),
+    RegulonB = c(A = NA_real_, B = 0.4, C = 0.9),
+    RegulonC = c(A = NA_real_, B = NA_real_, C = NA_real_)
+  )
+  features <- rownames(mat)
+  legacy <- function(x, features) {
+    x <- as.matrix(x[features, , drop = FALSE])
+    x[!is.finite(x)] <- NA_real_
+    max_group_idx <- apply(x, 1L, function(values) {
+      if (all(is.na(values))) {
+        return(NA_integer_)
+      }
+      which.max(replace(values, is.na(values), -Inf))
+    })
+    max_value <- apply(x, 1L, function(values) {
+      out <- suppressWarnings(max(values, na.rm = TRUE))
+      if (is.finite(out)) out else NA_real_
+    })
+    max_group <- colnames(x)[max_group_idx]
+    features[order(
+      factor(max_group, levels = colnames(x)),
+      -max_value,
+      features,
+      na.last = TRUE
+    )]
+  }
+
+  expect_identical(
+    scenic_order_heatmap_features(mat, features, heatmap_order = "group"),
+    legacy(mat, features)
+  )
+})
+
+test_that("SCENICPlot rss heatmap returns drawable plot object", {
+  dat <- make_scenic_plot_mock()
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "rss_heatmap",
+    features = rownames(dat$auc)[1:4],
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_s3_class(out$plots[[1]], "ggplot")
+  expect_false("matrix_list" %in% names(out$plot))
+  expect_s3_class(out$heatmap$plot, "ggplot")
+  expect_true("matrix_list" %in% names(out$heatmap))
+})
+
+test_that("SCENICPlusPlot rss heatmap keeps regulons with underscores", {
+  dat <- make_scenicplus_plot_mock()
+  original <- c("TF_1(+)", "TF-1(+)", "TF_5(+)")
+  rownames(dat$srt@tools$SCENICPlus$scores) <- original
+  dat$srt$CellType <- rep(c("A", "B"), each = 6)
+
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "rss_heatmap",
+    rss_scale = TRUE,
+    regulon_label = "tf",
+    heatmap_show_row_names = TRUE,
+    heatmap_order = "group",
+    return_data = TRUE,
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_setequal(as.character(unique(out$plot_data$regulon)), original)
+  expect_equal(nrow(out$heatmap$matrix_list[[1]]), length(original))
+})
+
+test_that("SCENICPlusPlot activity heatmap keeps regulons with underscores", {
+  dat <- make_scenicplus_plot_mock()
+  original <- c("TF_1(+)", "TF_2(+)", "TF_5(+)")
+  rownames(dat$srt@tools$SCENICPlus$scores) <- original
+  dat$srt$CellType <- rep(c("A", "B"), each = 6)
+
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_heatmap",
+    features = original,
+    activity_scale = TRUE,
+    heatmap_show_row_names = TRUE,
+    heatmap_order = "group",
+    return_data = TRUE,
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_setequal(as.character(unique(out$plot_data$regulon)), original)
+})
+
+test_that("SCENICPlot activity heatmap returns drawable plot object", {
+  dat <- make_scenic_plot_mock(seed = 2)
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_heatmap",
+    features = rownames(dat$auc)[1:4],
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_s3_class(out$plots[[1]], "ggplot")
+  expect_false("matrix_list" %in% names(out$plot))
+  expect_s3_class(out$heatmap$plot, "ggplot")
+  expect_true("matrix_list" %in% names(out$heatmap))
+})
+
+test_that("SCENICPlot activity violin forwards statistical arguments", {
+  skip_if_not_installed("ggpubr")
+  dat <- make_scenic_plot_mock(seed = 2)
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_violin",
+    features = rownames(dat$auc)[1],
+    violin_args = list(
+      comparisons = list(c("A", "B")),
+      pairwise_method = "wilcox.test",
+      sig_label = "p.format"
+    ),
+    combine = FALSE,
+    verbose = FALSE
+  )
+
+  compare_layers <- Filter(
+    function(layer) inherits(layer$stat, "StatSignif"),
+    out$plots[[1]]$layers
+  )
+  expect_length(compare_layers, 1)
+  expect_equal(compare_layers[[1]]$stat_params$comparisons, list(c("A", "B")))
+  expect_no_error(suppressWarnings(ggplot2::ggplot_build(out$plots[[1]])))
+})
+
+test_that("SCENICPlot activity heatmap can order rows by RSS source group", {
+  dat <- make_scenic_plot_mock(seed = 22)
+  dat$auc[, ] <- 0
+  dat$auc["TF1(+)", dat$srt$CellType == "A"] <- 4
+  dat$auc["TF2(+)", dat$srt$CellType == "A"] <- 3
+  dat$auc["TF3(+)", dat$srt$CellType == "B"] <- 4
+  dat$auc["TF4(+)", dat$srt$CellType == "B"] <- 3
+  dat$auc["TF5(+)", dat$srt$CellType == "C"] <- 4
+  dat$auc["TF6(+)", dat$srt$CellType == "C"] <- 3
+  dat$srt@tools$SCENIC <- list(scores_cells_by_regulon = t(dat$auc))
+
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_heatmap",
+    heatmap_order = "group",
+    heatmap_cluster_rows = FALSE,
+    top_n = 1,
+    verbose = FALSE
+  )
+
+  regulons <- rev(levels(out$plot_data$regulon))
+  expect_length(regulons, 3)
+  expect_equal(
+    as.character(unique(out$plot_data$rss_group[match(regulons, out$plot_data$regulon)])),
+    c("A", "B", "C")
+  )
+  expect_true(all(c("rss_group", "rss_rank") %in% colnames(out$plot_data)))
+})
+
+test_that("SCENICPlot activity heatmap explicit features are not replaced by top_n", {
+  dat <- make_scenic_plot_mock(seed = 23)
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_heatmap",
+    features = rownames(dat$auc)[1:4],
+    heatmap_order = "input",
+    top_n = 1,
+    verbose = FALSE
+  )
+
+  expect_equal(rev(levels(out$plot_data$regulon)), rownames(dat$auc)[1:4])
+  expect_true(all(c("rss_group", "rss_rank") %in% colnames(out$plot_data)))
+})
+
+test_that("SCENICPlot rss rank keeps requested labels by default", {
+  dat <- make_scenic_plot_mock(seed = 3)
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "rss_rank",
+    top_n = 4,
+    verbose = FALSE
+  )
+
+  label_layers <- Filter(
+    function(layer) inherits(layer$geom, "GeomTextRepel"),
+    out$plots[[1]]$layers
+  )
+  expect_length(label_layers, 1)
+  expect_equal(label_layers[[1]]$geom_params$max.overlaps, Inf)
+  expect_equal(
+    sum(out$top_table[["group"]] == unique(out$top_table[["group"]])[[1]]),
+    4
+  )
+})
+
+test_that("SCENIC RSS rank thins x-axis labels for long regulon lists", {
+  n_regulon <- 300L
+  groups <- c("A", "B")
+  rss <- matrix(
+    seq_len(n_regulon * length(groups)),
+    nrow = n_regulon,
+    dimnames = list(paste0("TF", seq_len(n_regulon)), groups)
+  )
+  rank_table <- do.call(rbind, lapply(groups, function(one_group) {
+    scores <- sort(rss[, one_group], decreasing = TRUE)
+    data.frame(
+      group = one_group,
+      regulon = names(scores),
+      TF = names(scores),
+      specificity_score = as.numeric(scores),
+      rank = seq_along(scores),
+      is_top = seq_along(scores) <= 3,
+      is_highlight = FALSE,
+      display_label = names(scores),
+      stringsAsFactors = FALSE
+    )
+  }))
+
+  out <- scenic_plot_rss_rank(
+    rss_matrix = rss,
+    rank_table = rank_table,
+    top_table = rank_table[rank_table[["is_top"]], , drop = FALSE]
+  )
+  x_breaks <- ggplot2::ggplot_build(out$plots[[1]])$layout$panel_params[[1]]$x$breaks
+  expect_true(1 %in% x_breaks)
+  expect_lte(length(x_breaks), 11)
+})
+
+test_that("SCENIC regulon labels preserve signed duplicates in auto mode", {
+  rank_table <- data.frame(
+    group = c("A", "B", "A"),
+    regulon = c("TF1(+)", "TF1(-)", "TF2(+)"),
+    TF = c("TF1", "TF1", "TF2"),
+    stringsAsFactors = FALSE
+  )
+
+  expect_equal(
+    scenic_regulon_display_labels(rank_table, mode = "auto"),
+    c("TF1(+)", "TF1(-)", "TF2")
+  )
+  expect_equal(
+    scenic_regulon_display_labels(rank_table, mode = "regulon"),
+    rank_table$regulon
+  )
+  expect_equal(
+    scenic_regulon_display_labels(rank_table, mode = "tf"),
+    rank_table$TF
+  )
+})
+
+test_that("SCENICPlot signed RSS rank uses signed labels and a shared y-axis", {
+  dat <- make_scenic_plot_mock(seed = 31)
+  rownames(dat$auc)[1:2] <- c("TF1(+)", "TF1(-)")
+  dat$srt@tools$SCENIC$scores_cells_by_regulon <- t(dat$auc)
+
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "rss_rank",
+    top_n = 3,
+    verbose = FALSE
+  )
+
+  tf1_labels <- unique(out$rank_table$display_label[out$rank_table$TF == "TF1"])
+  expect_setequal(tf1_labels, c("TF1(+)", "TF1(-)"))
+  expected_ylim <- range(out$rss_matrix, finite = TRUE)
+  score_span <- diff(expected_ylim)
+  expected_ylim <- expected_ylim + c(-0.04, 0.12) * score_span
+  expected_ylim[[1]] <- max(0, expected_ylim[[1]])
+  expect_true(all(vapply(out$plots, function(p) {
+    isTRUE(all.equal(p$coordinates$limits$y, expected_ylim))
+  }, logical(1))))
+  expect_equal(out$plots[[1]]$labels$y, "Regulon specificity score (RSS)")
+  expect_s3_class(out$plots[[1]]$theme$panel.border, "element_rect")
+  expect_false(inherits(out$plots[[1]]$theme$panel.border, "element_blank"))
+})
+
+test_that("SCENICPlot activity correlation dumbbell returns plot and statistics", {
+  dat <- make_scenic_plot_mock(seed = 5)
+  dat$auc[1, ] <- seq_len(ncol(dat$auc))
+  dat$auc[2, ] <- rev(seq_len(ncol(dat$auc)))
+  dat$srt@tools$SCENIC <- list(scores_cells_by_regulon = t(dat$auc))
+  dat$srt$AFP_score <- as.numeric(dat$auc[1, ])
+  dat$srt$CYP_signature <- as.numeric(dat$auc[2, ])
+
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_cor_dumbbell",
+    features = rownames(dat$auc)[1:2],
+    cor.features = c("AFP_score", "CYP_signature"),
+    cor.feature.labels = c("AFP expression", "CYP signature"),
+    cor_label = FALSE,
+    p_cutoff = 0.05,
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_s3_class(out$plots[[1]], "ggplot")
+  expect_equal(nrow(out$plot_data), 4)
+  expect_setequal(
+    as.character(unique(out$plot_data[["target"]])),
+    c("AFP expression", "CYP signature")
+  )
+  expect_true(all(c(
+    "regulon", "TF", "target", "target_feature",
+    "target_source", "cor", "p_val", "significant"
+  ) %in% colnames(out$plot_data)))
+  expect_equal(
+    out$plot_data[["significant"]],
+    out$plot_data[["p_val"]] < 0.05
+  )
+})
+
+test_that("SCENICPlot activity correlation dumbbell resolves TF and gene targets", {
+  dat <- make_scenic_plot_mock(seed = 6)
+  rownames(dat$auc)[1:2] <- c("TF1(+)", "TF1(-)")
+  dat$auc[1, ] <- seq_len(ncol(dat$auc))
+  dat$auc[2, ] <- rev(seq_len(ncol(dat$auc)))
+  dat$srt@tools$SCENIC <- list(scores_cells_by_regulon = t(dat$auc))
+  dat$srt$AFP_score <- as.numeric(dat$auc[1, ])
+
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_cor_dumbbell",
+    features = "TF1",
+    cor.features = c("AFP_score", "Gene1"),
+    layer = "counts",
+    cor_label = FALSE,
+    p_cutoff = 0.2,
+    verbose = FALSE
+  )
+
+  expect_setequal(
+    as.character(unique(out$plot_data[["regulon"]])),
+    c("TF1(+)", "TF1(-)")
+  )
+  expect_equal(nrow(out$plot_data), 4)
+  expect_true("metadata" %in% out$plot_data[["target_source"]])
+  expect_true("assay:RNA" %in% out$plot_data[["target_source"]])
+  expect_equal(
+    out$plot_data[["significant"]],
+    out$plot_data[["p_val"]] < 0.2
+  )
+})
+
+test_that("SCENICPlot resolves positive and negative regulon suffixes", {
+  dat <- make_scenic_plot_mock(seed = 4)
+  rownames(dat$auc)[1:2] <- c("TF1(+)", "TF1(-)")
+  dat$srt@tools$SCENIC <- list(scores_cells_by_regulon = t(dat$auc))
+
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "rss_dotplot",
+    features = "TF1",
+    verbose = FALSE
+  )
+
+  expect_setequal(as.character(unique(out$plot_data[["regulon"]])), c("TF1(-)", "TF1(+)"))
+  expect_equal(
+    sort(unique(out$rank_table[out$rank_table[["regulon"]] %in% c("TF1(+)", "TF1(-)"), "TF"])),
+    "TF1"
+  )
+})
+
+test_that("SCENICPlot heatmap_dotplot colors dots by TF expression", {
+  dat <- make_scenic_plot_mock(seed = 7)
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "heatmap_dotplot",
+    features = rownames(dat$auc)[1:4],
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_true(all(c("RSS", "TF_expr", "TF") %in% colnames(out$plot_data)))
+  expect_false(all(is.na(out$plot_data[["TF_expr"]])))
+  expect_setequal(
+    as.character(unique(out$plot_data[["TF"]])),
+    c("TF1", "TF2", "TF3", "TF4")
+  )
+})
+
+test_that("SCENICPlot activity_dim can compare TF expression", {
+  dat <- make_scenic_plot_mock(seed = 8, add_embedding = TRUE)
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "activity_dim",
+    features = c("TF1(+)", "TF2(+)"),
+    compare_expression = TRUE,
+    reduction = "umap",
+    return_data = TRUE,
+    verbose = FALSE
+  )
+
+  expect_true(inherits(out$plot, c("ggplot", "patchwork")))
+  expect_equal(length(out$plots), 2L)
+  expect_equal(length(out$plot), 2L)
+  expect_equal(as.character(out$plot_data[["regulon"]]), c("TF1(+)", "TF2(+)"))
+  expect_equal(as.character(out$plot_data[["TF"]]), c("TF1", "TF2"))
+})
+
+test_that("SCENICPlusPlot defaults to heatmap_dotplot and SCENIC+ slots", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    features = "TF1",
+    verbose = FALSE
+  )
+
+  expect_equal(out$plot_type, "heatmap_dotplot")
+  expect_s3_class(out$plot, "ggplot")
+  expect_true("TF1(+)" %in% as.character(out$plot_data[["regulon"]]))
+  expect_equal(unique(as.character(out$plot_data[["TF"]])), "TF1")
+})
+
+test_that("SCENICPlusPlot eregulon_dim includes region AUC when stored", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "eregulon_dim",
+    features = "TF1",
+    reduction = "umap",
+    verbose = FALSE
+  )
+
+  expect_true(inherits(out$plot, c("ggplot", "patchwork")))
+  expect_equal(as.character(out$plot_data[["regulon"]]), "TF1(+)")
+  expect_gte(length(out$plot), 2L)
+})
+
+test_that("SCENIC network RdYlBu uses Chinese colors", {
+  shared <- palette_colors(c("TF1", "TF2", "TF3"), palette = "Chinese")
+  node_data <- data.frame(
+    name = c("TF1", "TF2", "Gene1"),
+    node_type = c("TF", "TF", "gene"),
+    x = c(0, 1, 0.5),
+    y = c(0, 0, 1),
+    stringsAsFactors = FALSE
+  )
+  edge_data <- data.frame(
+    from = c("TF1", "TF2"),
+    to = c("Gene1", "Gene1"),
+    edge_type = c("tf_gene", "tf_gene"),
+    weight = c(1, 1),
+    stringsAsFactors = FALSE
+  )
+  styled <- scenic_network_style_data(
+    node_data = node_data,
+    edge_plot = edge_data,
+    edge_data = edge_data,
+    palette = "RdYlBu"
+  )
+  expect_equal(unname(styled$tf_cols[["TF1"]]), unname(shared[["TF1"]]))
+  expect_false(identical(unname(shared[["TF1"]]), unname(shared[["TF2"]])))
+  one <- palette_colors("TF2", palette = "Chinese", palcolor = shared)
+  expect_equal(unname(one[["TF2"]]), unname(shared[["TF2"]]))
+})
+
+test_that("network TF groups use the highest RSS cell type", {
+  rank_table <- data.frame(
+    group = c("A", "B", "A"),
+    regulon = c("TF1(+)", "TF1(+)", "TF2(+)"),
+    TF = c("TF1", "TF1", "TF2"),
+    specificity_score = c(0.2, 0.9, 0.5),
+    rank = c(2, 1, 1),
+    stringsAsFactors = FALSE
+  )
+  groups <- scenic_network_tf_groups(rank_table, c("TF1", "TF2"))
+  expect_equal(unname(groups[["TF1"]]), "B")
+  expect_equal(unname(groups[["TF2"]]), "A")
+})
+
+test_that("network TF annotations identify the winning signed regulon", {
+  rank_table <- data.frame(
+    group = c("Alpha", "Ductal", "Beta"),
+    regulon = c("TF1(+)", "TF1(-)", "TF2(+)"),
+    TF = c("TF1", "TF1", "TF2"),
+    specificity_score = c(0.3, 0.4, 0.5),
+    rank = c(2, 1, 1),
+    stringsAsFactors = FALSE
+  )
+  annotations <- scenic_network_tf_annotations(
+    rank_table,
+    c("TF1", "TF2"),
+    regulon_label = "auto"
+  )
+
+  expect_equal(
+    colnames(annotations),
+    c(
+      "TF", "regulon", "group", "specificity_score",
+      "regulons_per_tf", "show_regulon", "legend_label"
+    )
+  )
+  expect_equal(annotations$regulon, c("TF1(-)", "TF2(+)"))
+  expect_equal(annotations$group, c("Ductal", "Beta"))
+  expect_equal(annotations$regulons_per_tf, c(2L, 1L))
+  expect_equal(
+    annotations$legend_label,
+    c("TF1(-)", "TF2")
+  )
+})
+
+test_that("SCENICPlot network returns signed regulon annotations", {
+  dat <- make_scenic_plot_mock(seed = 32)
+  rownames(dat$auc)[1:2] <- c("TF1(+)", "TF1(-)")
+  dat$auc[1, dat$srt$CellType == "A"] <- 0.2
+  dat$auc[2, dat$srt$CellType == "B"] <- 1
+  dat$srt@tools$SCENIC$scores_cells_by_regulon <- t(dat$auc)
+
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "network",
+    features = "TF1",
+    verbose = FALSE
+  )
+
+  expect_equal(nrow(out$plot_data$annotations), 1L)
+  expect_equal(out$plot_data$annotations$TF, "TF1")
+  expect_equal(out$plot_data$annotations$regulons_per_tf, 2L)
+  expect_match(out$plot_data$annotations$legend_label, "TF1\\([+-]\\)")
+})
+
+test_that("SCENICPlusPlot network uses TF-region-gene hubs from triplets", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "network",
+    features = "TF1",
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_true("TF1" %in% out$plot_data$nodes$name)
+  expect_true("region" %in% as.character(out$plot_data$nodes$node_type))
+  expect_true("gene" %in% as.character(out$plot_data$nodes$node_type))
+  tf_node <- out$plot_data$nodes[out$plot_data$nodes$name == "TF1", ]
+  expect_equal(tf_node$x, 0, tolerance = 1e-8)
+  expect_equal(tf_node$y, 0, tolerance = 1e-8)
+  expect_true(all(c("tf_region", "region_gene") %in% out$plot_data$edges$edge_type))
+})
+
+test_that("SCENICPlot network places the TF at the hub center", {
+  dat <- make_scenic_plot_mock()
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "network",
+    features = "TF1",
+    verbose = FALSE
+  )
+
+  tf_node <- out$plot_data$nodes[out$plot_data$nodes$name == "TF1", ]
+  gene_nodes <- out$plot_data$nodes[out$plot_data$nodes$node_type == "gene", ]
+  expect_equal(tf_node$x, 0, tolerance = 1e-8)
+  expect_equal(tf_node$y, 0, tolerance = 1e-8)
+  expect_true(all(gene_nodes$x^2 + gene_nodes$y^2 > 1))
+  expect_true(all(out$plot_data$edges$from == "TF1"))
+  expect_null(out$plot$labels$title)
+  expect_null(out$plot$labels$subtitle)
+})
+
+test_that("SCENICPlot network draws multiple TF hubs in one plot", {
+  dat <- make_scenic_plot_mock()
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "network",
+    features = c("TF1", "TF2", "TF3"),
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_false(inherits(out$plot, "patchwork"))
+  tf_nodes <- out$plot_data$nodes[as.character(out$plot_data$nodes$node_type) == "TF", ]
+  expect_true(all(c("TF1", "TF2", "TF3") %in% tf_nodes$name))
+  expect_gt(sd(tf_nodes$x), 0.2)
+  expect_gt(sd(tf_nodes$y), 0.2)
+  expect_null(out$plot$labels$title)
+  expect_null(out$plot$labels$subtitle)
+})
+
+test_that("SCENICPlusPlot egrn draws TF, region, and gene nodes", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "egrn",
+    features = "TF1",
+    verbose = FALSE
+  )
+
+  nodes <- out$plot_data$nodes
+  expect_true(all(c("TF", "region", "gene") %in% as.character(nodes$node_type)))
+  expect_true("TF1" %in% nodes$name)
+  expect_null(out$plot$labels$title)
+  expect_null(out$plot$labels$subtitle)
+})
+
+test_that("SCENIC network node sizes are TF 8, gene 4, region 3.5", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "egrn",
+    features = "TF1",
+    verbose = FALSE
+  )
+  styled <- scenic_network_style_data(
+    node_data = out$plot_data$nodes,
+    edge_plot = out$plot_data$edges,
+    edge_data = out$plot_data$edges
+  )
+  region_size <- unique(styled$nodes$node_size[as.character(styled$nodes$node_type) == "region"])
+  gene_size <- unique(styled$nodes$node_size[as.character(styled$nodes$node_type) == "gene"])
+  tf_size <- unique(styled$nodes$node_size[as.character(styled$nodes$node_type) == "TF"])
+  expect_equal(tf_size, 8)
+  expect_equal(gene_size, 4)
+  expect_equal(region_size, 3.5)
+})
+
+test_that("SCENICPlusPlot egrn can use a tripartite layout", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "egrn",
+    features = "TF1",
+    network_layout = "tripartite",
+    verbose = FALSE
+  )
+
+  nodes <- out$plot_data$nodes
+  tf_x <- unique(nodes$x[as.character(nodes$node_type) == "TF"])
+  region_x <- unique(nodes$x[as.character(nodes$node_type) == "region"])
+  gene_x <- unique(nodes$x[as.character(nodes$node_type) == "gene"])
+  expect_lt(tf_x, region_x)
+  expect_lt(region_x, gene_x)
+})
+
+test_that("SCENICPlot overlap returns pairwise Jaccard values", {
+  dat <- make_scenic_plot_mock()
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "overlap",
+    features = c("TF1(+)", "TF2(+)", "TF3(+)"),
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_true(all(c("regulon_1", "regulon_2", "jaccard") %in% colnames(out$plot_data)))
+  diag <- out$plot_data$regulon_1 == out$plot_data$regulon_2
+  expect_true(all(out$plot_data$jaccard[diag] == 1))
+})
+
+test_that("SCENIC network_graph restores top RSS group legend labels", {
+  dat <- make_scenic_plot_mock()
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "network_graph",
+    max_targets = 5,
+    verbose = FALSE
+  )
+
+  expect_s3_class(out$plot, "ggplot")
+  expect_null(out$plot$labels$title)
+  expect_null(out$plot$labels$subtitle)
+  built <- ggplot2::ggplot_build(out$plot)
+  labels <- unlist(lapply(built$plot$scales$scales, function(sc) {
+    if (!inherits(sc, "ScaleDiscrete") || !any(sc$aesthetics == "fill")) {
+      return(character())
+    }
+    sc$get_breaks()
+  }))
+  expect_true(any(grepl("\\([ABC]\\)", labels)))
+  expect_true(any(grepl("^TF[1-6]", labels)))
+})
+
+test_that("SCENIC network_graph hub layout keeps TFs off a single line", {
+  dat <- make_scenic_plot_mock()
+  out <- SCENICPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "network_graph",
+    network_layout = "hub",
+    max_targets = 5,
+    verbose = FALSE
+  )
+
+  tf_nodes <- out$plot_data$nodes[as.character(out$plot_data$nodes$node_type) == "TF", ]
+  expect_gt(nrow(tf_nodes), 2)
+  expect_gt(sd(tf_nodes$x), 0.2)
+  expect_gt(sd(tf_nodes$y), 0.2)
+})
+
+test_that("SCENICPlusPlot network can disable region nodes", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "network",
+    features = "TF1",
+    network_include_regions = FALSE,
+    verbose = FALSE
+  )
+
+  expect_false("region" %in% as.character(out$plot_data$nodes$node_type))
+  expect_true(all(out$plot_data$edges$from == "TF1"))
+})
+
+test_that("scenic_tf_from_regulon parses SCENIC and SCENIC+ names", {
+  expect_equal(scenic_tf_from_regulon("TF1(+)"), "TF1")
+  expect_equal(scenic_tf_from_regulon("TF1(-)"), "TF1")
+  expect_equal(scenic_tf_from_regulon("TF5_direct_+/+_(12g)"), "TF5")
+  expect_equal(scenic_tf_from_regulon("TF1_+_+"), "TF1")
+})
+
+test_that("scenic_match_regulon_features matches SCENIC+ eRegulon names", {
+  available <- c("TF1_direct_+/+_(3g)", "TF5_direct_+/+_(2g)")
+  expect_equal(
+    scenic_match_regulon_features("TF1", available),
+    "TF1_direct_+/+_(3g)"
+  )
+})
+
+test_that("scenic_parse_genomic_region accepts Signac and SCENIC+ coordinates", {
+  parsed <- scenic_parse_genomic_region(c(
+    "chr1-100-200",
+    "chr1:300-400",
+    "chr2_500_600",
+    "chr1-1e+06-1000499"
+  ))
+  expect_equal(parsed$seqnames, c("chr1", "chr1", "chr2", "chr1"))
+  expect_equal(parsed$start, c(100, 300, 500, 1e6))
+  expect_equal(parsed$end, c(200, 400, 600, 1000499))
+})
+
+test_that("SCENICPlusPlot coverage returns region-gene tracks", {
+  skip_if_not_installed("Signac")
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "coverage",
+    features = "Gene1",
+    extend.upstream = 1000,
+    extend.downstream = 1000,
+    verbose = FALSE
+  )
+
+  expect_true(inherits(out$plot, c("ggplot", "patchwork")))
+  expect_true(all(out$plot_data$gene == "Gene1"))
+  expect_true(all(c("region", "start", "end", "score") %in% colnames(out$plot_data)))
+  expect_gt(nrow(out$plot_data), 0)
+})
+
+test_that("SCENICPlusPlot coverage resolves TF features to target genes", {
+  skip_if_not_installed("Signac")
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(
+    dat$srt,
+    group.by = "CellType",
+    plot_type = "coverage",
+    features = "TF1",
+    extend.upstream = 1000,
+    extend.downstream = 1000,
+    verbose = FALSE
+  )
+
+  expect_true(all(out$plot_data$TF == "TF1"))
+  expect_true("Gene1" %in% out$plot_data$gene)
+})
+
+test_that("network_graph defaults to FR and still supports explicit KK", {
+  dat <- make_scenic_plot_mock()
+  draw <- function(...) {
+    set.seed(42)
+    SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+               network_tf = c("TF1", "TF2", "TF3"), verbose = FALSE, ...)
+  }
+  automatic <- draw()
+  explicit_fr <- draw(network_layout = "fr")
+  explicit_kk <- draw(network_layout = "kk")
+  expect_equal(automatic$plot_data$nodes[, c("name", "x", "y")],
+               explicit_fr$plot_data$nodes[, c("name", "x", "y")])
+  expect_false(isTRUE(all.equal(explicit_fr$plot_data$nodes[, c("x", "y")],
+                               explicit_kk$plot_data$nodes[, c("x", "y")])))
+  expect_equal(automatic$plot_data$edges, explicit_kk$plot_data$edges)
+  expect_equal(automatic$plot_data$display_edges, automatic$plot_data$edges)
+})
+
+test_that("network_graph honors network_tf with the same neighbor selection as features", {
+  dat <- make_scenic_plot_mock()
+  by_tf <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                     network_tf = "TF1", verbose = FALSE)
+  by_feature <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                          features = "TF1", verbose = FALSE)
+  expect_equal(by_tf$plot_data$edges, by_feature$plot_data$edges)
+  expect_setequal(by_tf$plot_data$nodes$name, c("TF1", "Gene1", "Gene2"))
+  precedence <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                           features = "TF3", network_tf = "TF1", verbose = FALSE)
+  expect_equal(precedence$plot_data$edges, by_tf$plot_data$edges)
+})
+
+test_that("network_graph limits SCENIC+ triplets to the selected TF neighborhood", {
+  dat <- make_scenicplus_plot_mock()
+  out <- SCENICPlusPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                        network_tf = "TF1", verbose = FALSE)
+  expect_true(all(out$plot_data$edges$from[out$plot_data$edges$edge_type == "tf_region"] == "TF1"))
+  expect_false("TF5" %in% out$plot_data$nodes$name)
+})
+
+test_that("automatic network labels include focal TFs and shared targets", {
+  dat <- make_scenic_plot_mock()
+  dat$srt@tools$SCENIC$adjacency <- rbind(dat$srt@tools$SCENIC$adjacency,
+    data.frame(TF = "TF2", target = "Gene1", importance = 2))
+  out <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                    network_tf = c("TF1", "TF2"), verbose = FALSE)
+  layers <- Filter(function(x) inherits(x$geom, c("GeomText", "GeomTextRepel")), out$plot$layers)
+  labels <- unlist(lapply(layers, function(x) as.character(x$data[["name"]])))
+  expect_setequal(labels, c("TF1", "TF2", "Gene1"))
+})
+
+test_that("network_graph respects its label budget and explicit all or none", {
+  dat <- make_scenic_plot_mock()
+  labels <- function(out) {
+    layers <- Filter(function(x) inherits(x$geom, c("GeomText", "GeomTextRepel")), out$plot$layers)
+    unlist(lapply(layers, function(x) as.character(x$data[["name"]])))
+  }
+  out <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                    network_label_top_n = 2, verbose = FALSE)
+  expect_lte(length(labels(out)), 2L)
+  all <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                    network_label_top_n = 2, label_nodes = "all", verbose = FALSE)
+  expect_setequal(labels(all), all$plot_data$nodes$name)
+  none <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                     label_nodes = "none", verbose = FALSE)
+  expect_length(labels(none), 0)
+})
+
+test_that("SCENIC restores TF and gene circles from its historical renderer", {
+  dat <- make_scenic_plot_mock()
+  out <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+                    network_tf = "TF1", verbose = FALSE)
+  built <- ggplot2::ggplot_build(out$plot)
+  point_idx <- which(vapply(out$plot$layers, function(x) inherits(x$geom, "GeomPoint"), logical(1)))
+  shapes <- unlist(lapply(unname(point_idx), function(idx) {
+    stats::setNames(built$data[[idx]]$shape, out$plot$layers[[idx]]$data$name)
+  }))
+  expect_equal(unname(shapes["TF1"]), 21)
+  expect_true(all(shapes[c("Gene1", "Gene2")] == 21))
+})
+
+test_that("large TF legends cannot squeeze the network viewport to zero", {
+  edge_data <- data.frame(
+    from = paste0("LongTranscriptionFactor", seq_len(350)), to = "Target",
+    weight = 1, edge_type = "tf_gene", edge_sign = "positive"
+  )
+  net <- scenic_network_plot_data(edge_data, layout = "fr")
+  labels <- scenic_network_label_data(net$nodes, label_nodes = "tfs", top_n = 20)
+  plot <- scenic_network_ggplot(net$nodes, net$edge_plot, net$edges,
+                                label_data = labels, label_nodes = "auto", layout = "fr")
+  file <- tempfile(fileext = ".pdf")
+  grDevices::pdf(file, width = 10, height = 10)
+  on.exit({ grDevices::dev.off(); unlink(file) })
+  expect_error(print(plot), NA)
+  expect_equal(nrow(net$nodes), 351L)
+  expect_equal(nrow(net$edges), 350L)
+})
+
+test_that("SCENIC rendering keeps both directions of reciprocal edges", {
+  edges <- data.frame(from = c("TF1", "TF2"), to = c("TF2", "TF1"),
+                      weight = c(1, -2), edge_type = "tf_gene",
+                      edge_sign = c("positive", "negative"))
+  net <- scenic_network_plot_data(edges, layout = "fr")
+  plot <- scenic_network_ggplot(net$nodes, net$edge_plot, net$edges,
+                                label_data = net$nodes, label_nodes = "all", curvature = 0.08)
+  layer <- Filter(function(x) inherits(x$geom, "GeomCurve"), plot$layers)[[1]]
+  expect_equal(nrow(layer$data), 2L)
+  expect_setequal(paste(layer$data$from, layer$data$to), c("TF1 TF2", "TF2 TF1"))
+  expect_equal(length(unique(layer$data[["edge_color"]])), 2L)
+})
+
+test_that("compact display keeps weak shared targets and reciprocal TF links", {
+  edges <- data.frame(
+    from = c(rep("TF1", 4), rep("TF2", 4), "OtherTF"),
+    to = c("A", "B", "Shared", "TF2", "C", "D", "Shared", "TF1", "TF1"),
+    weight = c(9, 8, 0.1, 0.05, 9, 8, 0.2, -0.05, 20),
+    edge_type = "tf_gene",
+    edge_sign = c(rep("positive", 7), "negative", "positive")
+  )
+  compact <- scenic_network_display_data(edges, c("TF1", "TF2"), target_limit = 1)
+  expect_equal(compact$edges, edges[c(1, 3, 4, 5, 7, 8), ])
+  expect_setequal(compact$nodes$name, c("TF1", "TF2", "A", "C", "Shared"))
+  expect_equal(scenic_network_display_data(edges, c("TF1", "TF2"), target_limit = Inf)$edges, edges)
+  expect_error(scenic_network_display_data(edges, "TF1", target_limit = 0), "positive integer")
+  expect_error(scenic_network_display_data(edges, "TF1", target_limit = 1.5), "positive integer")
+
+  dat <- make_scenic_plot_mock()
+  dat$srt@tools$SCENIC$adjacency <- data.frame(TF = edges$from,
+    target = edges$to, importance = edges$weight)
+  out <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+    network_tf = c("TF1", "TF2"), network_display_targets = 1, verbose = FALSE)
+  expect_equal(nrow(out$plot_data$edges), nrow(edges))
+  expect_equal(nrow(out$plot_data$display_edges), 6L)
+  expect_true("OtherTF" %in% out$plot_data$nodes$name)
+  expect_false("OtherTF" %in% out$plot_data$display_nodes$name)
+  layer <- Filter(function(x) inherits(x$geom, "GeomCurve"), out$plot$layers)[[1]]
+  expect_equal(nrow(layer$data), 6L)
+  full <- SCENICPlot(dat$srt, group.by = "CellType", plot_type = "network_graph",
+    network_tf = c("TF1", "TF2"), network_display_targets = Inf, verbose = FALSE)
+  expect_equal(full$plot_data$display_edges, full$plot_data$edges)
+})
+
+test_that("compact SCENIC+ display keeps downstream genes for selected regions", {
+  edges <- data.frame(from = c("TF1", "TF1", "TF2", "R1", "R2", "R3"),
+    to = c("R1", "R2", "R3", "Gene1", "Gene2", "Gene3"),
+    weight = c(3, 1, 2, 1, 1, 1),
+    edge_type = c(rep("tf_region", 3), rep("region_gene", 3)),
+    edge_sign = "positive")
+  compact <- scenic_network_display_data(edges, c("TF1", "TF2"), target_limit = 1)
+  expect_equal(compact$edges, edges[c(1, 3, 4, 6), ])
+  expect_setequal(compact$nodes$name, c("TF1", "TF2", "R1", "R3", "Gene1", "Gene3"))
+})

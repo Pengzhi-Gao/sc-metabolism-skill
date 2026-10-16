@@ -1,0 +1,29 @@
+# R for travis: see documentation at https://docs.travis-ci.com/user/languages/r
+
+language: r
+cache: packages
+
+r:
+    - bioc-release
+    - devel
+    - oldrel
+    - 3.4
+
+sudo: false
+
+addons:
+    apt:
+        packages:
+            - libhdf5-dev
+
+## Turn this to true before submission to CRAN/Bioconductor
+warnings_are_errors: false
+
+bioc_packages:
+    - BiocCheck
+
+before_install:
+    - Rscript -e 'update.packages(ask = FALSE)'
+
+after_success:
+    - R CMD BiocCheck .

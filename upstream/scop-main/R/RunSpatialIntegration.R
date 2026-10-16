@@ -1,0 +1,1267 @@
+#' @title Run multi-sample spatial integration
+#'
+#' @description
+#' Integrate spatial transcriptomics samples and identify shared domains
+#' using PRECAST.
+#'
+#' @md
+#' @inheritParams RunSpatialVariableFeatures
+#' @inheritParams SpatialSpotPlot
+#' @inheritParams scop-params
+#' @param object A merged spatial `Seurat` object or a list of spatial `Seurat`
+#' objects.
+#' @param image Optional image name or named character vector mapping sample
+#' names to image names. By default, resolve the unique image covering each
+#' sample independently. Every input sample must remain represented.
+#' For list input, image names refer to each original list element, before
+#' Seurat renames duplicate image keys during merging.
+#' @param method Spatial integration backend. The current stable backend is
+#' `"PRECAST"`.
+#' @param layer Layer containing finite, non-negative integer counts. PRECAST
+#' normalizes this selected matrix internally; normalized expression is rejected.
+#' @param sample.by Metadata column identifying samples for a merged `Seurat`
+#' object. For list input, list names are copied into this column.
+#' @param reduction.name Name of the integrated embedding reduction. If `NULL`,
+#' a method-specific name is used.
+#' @param cluster_colname Metadata column used for spatial domain labels. If
+#' `NULL`, a method-specific name is used.
+#' @param coordinate_space Coordinate system used for integration distances
+#' and aligned-coordinate input. The default is raw acquisition coordinates;
+#' `"legacy_display"` remains an explicit compatibility option.
+#' @param tool_name Name used to store detailed results in `srt@tools`.
+#' @param store_object Whether to retain the complete native PRECAST object in
+#' the stored method result. Set `FALSE` for a lighter result bundle; standard
+#' embeddings, domains, coordinates, parameters, summaries, and plotting do
+#' not require the native object.
+#' @param ... Named backend argument lists: `create_params`, `adj_params`,
+#' `par_params`, `run_params`, and `select_params`. The default adjacency is
+#' `adj_params = list(type = "fixed_number", number = 6)`, using distances in
+#' the selected coordinate space and SCOP's exact spatial KNN implementation.
+#' PRECAST's fixed-distance Visium/ST array-index
+#' mode is not compatible with these coordinates and is rejected. For generic
+#' distance-based adjacency, explicitly choose `platform = "Other_SRT"`.
+#'
+#' @details
+#' Provide spatial samples with shared genes and raw coordinates. Use
+#' `sample.by` to identify samples and `image` to select their spatial images.
+#' PRECAST integrates expression and domain representations; it is not a
+#' physical image-registration method.
+#'
+#' Stored results retain a private per-cell identity metadata column for
+#' [GetSpatialResult()]. Preserve this column when subsetting or renaming cells.
+#' The accessor returns current-cell assignments; stored native results and
+#' fit parameters remain unchanged.
+#'
+#' @return A `Seurat` object with spatial integration results stored in
+#' metadata, reductions, and `srt@tools[[tool_name]]`.
+#' @export
+#'
+RunSpatialIntegration <- function(
+  object,
+  method = "PRECAST",
+  sample.by = NULL,
+  assay = NULL,
+  layer = "counts",
+  coord.cols = c("col", "row"),
+  features = NULL,
+  image = NULL,
+  reduction.name = NULL,
+  cluster_colname = NULL,
+  tool_name = "SpatialIntegration",
+  store_results = TRUE,
+  store_object = TRUE,
+  verbose = TRUE,
+  coordinate_space = c("raw", "legacy_display"),
+  ...
+) {
+  method <- match.arg(method)
+  coordinate_space <- match.arg(coordinate_space)
+  validate_scalar_string(tool_name, "tool_name")
+  validate_scalar_flag(store_results, "store_results")
+  validate_scalar_flag(store_object, "store_object")
+  sample.by <- spatial_integration_resolve_sample_by(object, sample.by)
+  reduction.name <- reduction.name %||% paste0("SpatialIntegration_", method)
+  cluster_colname <- cluster_colname %||% paste0("SpatialIntegration_", method, "_domain")
+  validate_scalar_string(reduction.name, "reduction.name")
+  validate_scalar_string(cluster_colname, "cluster_colname")
+
+  input <- spatial_integration_prepare_input(
+    object = object,
+    sample.by = sample.by,
+    assay = assay,
+    layer = layer,
+    features = features,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space
+  )
+
+  log_message(
+    "Run {.pkg {method}} spatial integration with {.val {length(input$samples)}} sample{?s} and {.val {length(input$cells)}} spot{?s}",
+    verbose = verbose
+  )
+  backend <- spatial_integration_run_backend(
+    method = method,
+    input = input,
+    verbose = verbose,
+    ...
+  )
+  result <- spatial_integration_standardize_result(
+    backend = backend,
+    input = input,
+    method = method
+  )
+  srt <- spatial_integration_apply_result(
+    srt = input$srt,
+    result = result,
+    method = method,
+    sample.by = sample.by,
+    assay = input$assay,
+    layer = layer,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space,
+    coordinate_sources = input$coordinate_sources,
+    reduction.name = reduction.name,
+    cluster_colname = cluster_colname,
+    tool_name = tool_name,
+    store_results = store_results,
+    store_object = store_object
+  )
+  log_message(
+    if (store_results) "{.pkg {method}} spatial integration results stored in {.code srt@tools[[{tool_name}]]}" else
+      "{.pkg {method}} spatial integration completed; detailed results were not stored",
+    message_type = "success",
+    verbose = verbose
+  )
+  srt
+}
+
+
+#' @title Plot spatial integration results
+#'
+#' @description
+#' Visualize standardized results produced by [RunSpatialIntegration()].
+#'
+#' @md
+#' @inheritParams SpatialSpotPlot
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A `Seurat` object containing spatial integration results.
+#' @param method Stored integration method. If `NULL`, the active method stored
+#' in `srt@tools[[tool_name]]` is used.
+#' @param plot_type Plot type: `"spatial"`, `"embedding"`, `"alignment"`, or
+#' `"composition"`.
+#' @param group.by Metadata column used for coloring. Defaults to the stored
+#' spatial domain column.
+#' @param sample.by Metadata column used for facets or composition grouping.
+#' Defaults to the stored sample column.
+#' @param reduction Reduction used for embedding plots. Defaults to the stored
+#' integration reduction.
+#' @param cluster_colname Backward-compatible alias for `group.by`.
+#' @param use_aligned Whether spatial plots should use aligned coordinates when
+#' available.
+#' @param tool_name Name of the `srt@tools` entry created by
+#' [RunSpatialIntegration()].
+#' @param combine Whether to combine plots when delegated plotting returns a
+#' list.
+#' @param ... Additional arguments passed to [SpatialSpotPlot()] or
+#' [CellDimPlot()]. For spatial maps, `image` can be one image or a named
+#' sample-to-image vector using names in the merged object. By default, each
+#' sample uses its uniquely matching image. `nrow`, `ncol` and `byrow` control
+#' the layout of separate image panels.
+#' @details
+#' Raw spatial maps retain every sample and use consistent category colors.
+#' Aligned maps use the stored aligned coordinates without a raw tissue-image
+#' overlay. This plotting option does not perform image registration.
+#'
+#' @return A `ggplot`, patchwork object, or list of plots.
+#' @seealso [RunSpatialIntegration()]
+#'
+#' @examples
+#' \dontrun{
+#' # Template: visium_S1 and visium_S2 are existing spatial Seurat samples.
+#' spatial <- RunSpatialIntegration(
+#'   list(S1 = visium_S1, S2 = visium_S2),
+#'   method = "PRECAST",
+#'   assay = "Spatial",
+#'   image = c(S1 = "slice1", S2 = "slice1")
+#' )
+#' SpatialIntegrationPlot(spatial, method = "PRECAST", plot_type = "spatial")
+#' }
+#' @export
+#'
+SpatialIntegrationPlot <- function(
+  object,
+  method = NULL,
+  plot_type = c("spatial", "embedding", "alignment", "composition"),
+  group.by = NULL,
+  sample.by = NULL,
+  reduction = NULL,
+  cluster_colname = NULL,
+  coord.cols = c("col", "row"),
+  use_aligned = FALSE,
+  tool_name = "SpatialIntegration",
+  combine = TRUE,
+  palette = "Chinese",
+  palcolor = NULL,
+  theme_use = "theme_scop",
+  theme_args = list(),
+  ...,
+  image.scale = c("lowres", "hires"),
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  plot_type <- match.arg(plot_type)
+  if (missing(theme_use) && plot_type %in% c("spatial", "alignment")) {
+    theme_use <- "theme_spatial"
+  }
+  image.scale <- match.arg(image.scale)
+  bundle <- srt@tools[[tool_name]]
+  if (is.null(bundle)) {
+    log_message(
+      "Cannot find spatial integration results in {.code srt@tools[[{tool_name}]]}",
+      message_type = "error"
+    )
+  }
+  method <- method %||% bundle$active_method
+  method_bundle <- spatial_integration_get_method_bundle(bundle, method)
+  spatial_require_coordinate_contract(method_bundle, "RunSpatialIntegration()")
+  parameters <- method_bundle$parameters %||% bundle$parameters %||% list()
+  group.by <- group.by %||% cluster_colname %||% parameters$cluster_colname
+  sample.by <- sample.by %||% parameters$sample.by
+  reduction <- reduction %||% parameters$reduction.name
+  if (is.null(group.by) || !group.by %in% colnames(srt@meta.data)) {
+    log_message(
+      "A valid {.arg group.by} metadata column is required for spatial integration plotting",
+      message_type = "error"
+    )
+  }
+
+  if (identical(plot_type, "spatial")) {
+    coord_use <- if (missing(coord.cols)) parameters$coord.cols %||% coord.cols else coord.cols
+    dots <- list(...)
+    if (isTRUE(use_aligned)) {
+      coord_use <- parameters$aligned_coord_cols
+      if (is.null(coord_use) || !all(coord_use %in% colnames(srt@meta.data))) {
+        log_message(
+          "Aligned coordinates are not available for {.arg use_aligned = TRUE}",
+          message_type = "error"
+        )
+      }
+      if (isTRUE(dots$overlay_image) || !is.null(dots$image)) {
+        log_message("Aligned coordinates cannot use a raw image overlay or image selection", message_type = "error")
+      }
+      srt@images <- list()
+      dots$overlay_image <- FALSE
+    } else if (length(SeuratObject::Images(srt)) > 0L) {
+      image_map <- spatial_integration_plot_images(srt, sample.by, parameters, dots$image)
+      dots$image <- NULL
+      layout_args <- dots[intersect(names(dots), c("nrow", "ncol", "byrow"))]
+      dots[c("nrow", "ncol", "byrow")] <- NULL
+      requested_cells <- dots$cells %||% colnames(srt)
+      dots$cells <- NULL
+      if (is.numeric(srt@meta.data[[group.by]])) {
+        values <- srt@meta.data[intersect(colnames(srt), requested_cells), group.by, drop = TRUE]
+        values <- values[is.finite(values)]
+        if (length(values)) {
+          dots$lower_cutoff <- dots$lower_cutoff %||% unname(stats::quantile(values, dots$lower_quantile %||% 0))
+          dots$upper_cutoff <- dots$upper_cutoff %||% unname(stats::quantile(values, dots$upper_quantile %||% 0.99))
+        }
+      } else {
+        srt@meta.data[[group.by]] <- spatial_plot_factor(srt@meta.data[[group.by]])
+      }
+      plots <- lapply(names(image_map), function(sample) {
+        sample_cells <- colnames(srt)[as.character(srt@meta.data[[sample.by]]) == sample]
+        sample_cells <- intersect(sample_cells, requested_cells)
+        if (!length(sample_cells)) return(NULL)
+        do.call(SpatialSpotPlot, c(list(
+          object = srt, group.by = group.by, image = image_map[[sample]],
+          cells = sample_cells, coord.cols = coord_use, image.scale = image.scale,
+          palette = palette, palcolor = palcolor, theme_use = theme_use,
+          theme_args = theme_args
+        ), dots)) + ggplot2::labs(title = sample)
+      })
+      names(plots) <- names(image_map)
+      plots <- Filter(Negate(is.null), plots)
+      if (!length(plots)) log_message("No samples remain for spatial plotting", message_type = "error")
+      if (!isTRUE(combine)) return(plots)
+      if (length(plots) == 1L) return(plots[[1L]])
+      combined <- do.call(patchwork::wrap_plots, c(list(plotlist = plots, guides = "collect"), layout_args))
+      return(combined & ggplot2::theme(
+        legend.position = dots$legend.position %||% "right",
+        legend.direction = dots$legend.direction %||% "vertical"
+      ))
+    }
+    return(do.call(SpatialSpotPlot, c(list(
+      object = srt,
+      group.by = group.by,
+      split.by = sample.by,
+      coord.cols = coord_use,
+      image.scale = image.scale,
+      combine = combine,
+      palette = palette,
+      palcolor = palcolor,
+      theme_use = theme_use,
+      theme_args = theme_args
+    ), dots)))
+  }
+
+  if (identical(plot_type, "embedding")) {
+    if (is.null(reduction) || !reduction %in% SeuratObject::Reductions(srt)) {
+      log_message(
+        "A valid integrated {.arg reduction} is required for embedding plots",
+        message_type = "error"
+      )
+    }
+    dots <- list(...)
+    if (is.null(dots$show_stat)) {
+      dots$show_stat <- FALSE
+    }
+    embedding_plots <- do.call(
+      CellDimPlot,
+      c(
+        list(
+          object = srt,
+          group.by = group.by,
+          reduction = reduction,
+          split.by = sample.by,
+          combine = FALSE,
+          palette = palette,
+          palcolor = palcolor,
+          theme_use = theme_use,
+          theme_args = theme_args
+        ),
+        dots
+      )
+    )
+    if (isFALSE(combine)) {
+      return(embedding_plots)
+    }
+    if (length(embedding_plots) == 1L) {
+      return(embedding_plots[[1L]])
+    }
+    return(patchwork::wrap_plots(embedding_plots, guides = "collect"))
+  }
+
+  if (identical(plot_type, "composition")) {
+    return(spatial_integration_composition_plot(
+      srt = srt,
+      group.by = group.by,
+      sample.by = sample.by,
+      palette = palette,
+      palcolor = palcolor,
+      theme_use = theme_use,
+      theme_args = theme_args
+    ))
+  }
+
+  spatial_integration_alignment_plot(
+    srt = srt,
+    group.by = group.by,
+    sample.by = sample.by,
+    parameters = parameters,
+    palette = palette,
+    palcolor = palcolor,
+    theme_use = theme_use,
+    theme_args = theme_args
+  )
+}
+
+spatial_integration_plot_images <- function(srt, sample.by, parameters, image = NULL) {
+  if (is.null(sample.by) || !sample.by %in% names(srt@meta.data)) {
+    log_message("A valid {.arg sample.by} is required for spatial image panels", message_type = "error")
+  }
+  if (length(SeuratObject::Images(srt)) == 0L) return(NULL)
+  samples <- unique(as.character(srt@meta.data[[sample.by]]))
+  sources <- parameters$coordinate_sources %||% list()
+  preferred <- stats::setNames(rep(NA_character_, length(samples)), samples)
+  for (sample in samples) {
+    source <- sources[[sample]]
+    if (
+      is.list(source) && length(source$image) == 1L &&
+        !identical(source$selection_namespace, "input_sample")
+    ) {
+      preferred[[sample]] <- as.character(source$image)
+    }
+  }
+  spatial_resolve_sample_images(
+    srt = srt,
+    sample.by = sample.by,
+    image = image,
+    preferred = preferred,
+    require_image = TRUE
+  )
+}
+
+spatial_integration_prepare_input <- function(
+  object,
+  sample.by,
+  assay,
+  layer,
+  features,
+  image,
+  coord.cols,
+  coordinate_space = "raw"
+) {
+  list_coordinates <- NULL
+  if (inherits(object, "Seurat")) {
+    if (!sample.by %in% colnames(object@meta.data)) {
+      log_message(
+        "{.arg sample.by} {.val {sample.by}} is not present in {.arg object}",
+        message_type = "error"
+      )
+    }
+    samples <- as.character(object@meta.data[[sample.by]])
+    if (any(is.na(samples) | !nzchar(samples))) {
+      log_message(
+        "{.arg sample.by} contains missing sample labels",
+        message_type = "error"
+      )
+    }
+    srt <- object
+    srt_list <- NULL
+  } else {
+    srt_list <- spatial_integration_as_list(object, sample.by = sample.by)
+    list_coordinates <- spatial_integration_list_coords(
+      srt_list, sample.by, image,
+      coord.cols, coordinate_space
+    )
+    srt <- spatial_integration_merge_list(srt_list, sample.by = sample.by)
+  }
+  assay <- assay %||% SeuratObject::DefaultAssay(srt)
+  if (!assay %in% SeuratObject::Assays(srt)) {
+    log_message(
+      "{.arg assay} {.val {assay}} is not present in {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  expr <- GetAssayData5(srt, assay = assay, layer = layer)
+  count_values <- if (inherits(expr, "sparseMatrix")) expr@x else as.vector(expr)
+  if (!is.numeric(count_values) || any(!is.finite(count_values)) ||
+      any(count_values < 0 | abs(count_values - round(count_values)) > 1e-8)) {
+    log_message("PRECAST requires finite non-negative integer counts in the selected assay/layer", message_type = "error")
+  }
+  features_use <- if (is.null(srt_list)) {
+    spatial_integration_features_merged(
+      features = features,
+      expr = expr,
+      srt = srt,
+      assay = assay
+    )
+  } else {
+    spatial_integration_features(
+      features = features,
+      expr = expr,
+      srt_list = srt_list,
+      assay = assay
+    )
+  }
+  coordinate_input <- list_coordinates %||% spatial_sample_coords(
+    srt = srt,
+    sample.by = sample.by,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space
+  )
+  coords <- coordinate_input$data
+  cells <- intersect(colnames(srt), colnames(expr))
+  cells <- intersect(cells, rownames(coords))
+  coords <- coords[cells, , drop = FALSE]
+  keep_coords <- is.finite(coords$x) & is.finite(coords$y)
+  cells <- cells[keep_coords]
+  coords <- coords[cells, , drop = FALSE]
+  if (length(cells) < 3L) {
+    log_message(
+      "At least three spatial spots with finite coordinates are required",
+      message_type = "error"
+    )
+  }
+  expr <- expr[features_use, cells, drop = FALSE]
+  keep_features <- Matrix::rowSums(expr != 0) > 0
+  keep_cells <- Matrix::colSums(expr != 0) > 0
+  expr <- expr[keep_features, keep_cells, drop = FALSE]
+  coords <- coords[colnames(expr), , drop = FALSE]
+  cells <- colnames(expr)
+  if (nrow(expr) == 0L || ncol(expr) == 0L) {
+    log_message(
+      "No non-zero features or spots remain for spatial integration",
+      message_type = "error"
+    )
+  }
+  expr <- spatial_integration_sparse_matrix(expr)
+  split_cells <- split(cells, srt@meta.data[cells, sample.by, drop = TRUE])
+  if (!setequal(names(split_cells)[lengths(split_cells) > 0L], unique(as.character(srt[[sample.by, drop = TRUE]])))) {
+    log_message("Spatial integration filtering removed an entire input sample", message_type = "error")
+  }
+  list(
+    srt = srt,
+    srt_list = {
+      .inline0 <- srt
+      .inline1 <- split_cells
+      lapply(.inline1, function(cells) {
+        .inline0[, cells]
+      })
+    },
+    expr = expr,
+    expr_list = lapply(split_cells, function(x) expr[, x, drop = FALSE]),
+    coords = coords,
+    coordinate_sources = coordinate_input$sources,
+    coords_list = lapply(split_cells, function(x) coords[x, , drop = FALSE]),
+    samples = names(split_cells),
+    cells = cells,
+    features = rownames(expr),
+    assay = assay,
+    sample.by = sample.by
+  )
+}
+
+spatial_integration_as_list <- function(object, sample.by) {
+  if (inherits(object, "Seurat")) {
+    if (!sample.by %in% colnames(object@meta.data)) {
+      log_message(
+        "{.arg sample.by} {.val {sample.by}} is not present in {.arg object}",
+        message_type = "error"
+      )
+    }
+    samples <- as.character(object@meta.data[[sample.by]])
+    if (any(is.na(samples) | !nzchar(samples))) {
+      log_message(
+        "{.arg sample.by} contains missing sample labels",
+        message_type = "error"
+      )
+    }
+    out <- Seurat::SplitObject(object, split.by = sample.by)
+    names(out) <- names(out) %||% unique(samples)
+    return(out)
+  }
+  if (!is.list(object) || length(object) == 0L) {
+    log_message(
+      "{.arg object} must be a {.cls Seurat} object or a non-empty list of {.cls Seurat} objects",
+      message_type = "error"
+    )
+  }
+  is_seurat <- vapply(object, inherits, logical(1), what = "Seurat")
+  if (!all(is_seurat)) {
+    log_message(
+      "Every element of {.arg object} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  nms <- names(object)
+  if (is.null(nms) || any(is.na(nms) | !nzchar(nms))) {
+    nms <- paste0("sample", seq_along(object))
+  }
+  nms <- make.unique(as.character(nms), sep = "_")
+  names(object) <- nms
+  for (nm in nms) {
+    object[[nm]]@meta.data[[sample.by]] <- nm
+  }
+  object
+}
+
+spatial_integration_merge_list <- function(srt_list, sample.by) {
+  if (length(srt_list) == 1L) {
+    srt <- srt_list[[1L]]
+    srt@meta.data[[sample.by]] <- names(srt_list)[1L]
+    return(srt)
+  }
+  merged <- merge(
+    x = srt_list[[1L]],
+    y = srt_list[-1L],
+    add.cell.ids = names(srt_list),
+    merge.data = TRUE
+  )
+  for (sample in names(srt_list)) {
+    original <- srt_list[[sample]]
+    for (image in SeuratObject::Images(original)) {
+      if (!inherits(original[[image]], "VisiumV2")) next
+      orientation <- spatial_image_x_orientation(original, image)
+      cells <- paste(sample, SeuratObject::Cells(original[[image]]), sep = "_")
+      matches <- SeuratObject::Images(merged)[vapply(merged@images, function(img) {
+        setequal(SeuratObject::Cells(img), cells)
+      }, logical(1))]
+      for (target in matches) merged@misc$spatial_image_axes[[target]] <- orientation
+    }
+  }
+  merged
+}
+
+spatial_integration_list_coords <- function(objects, sample.by, image, coord.cols, space) {
+  samples <- names(objects)
+  if (!is.null(image) && (length(image) > 1L || !is.null(names(image)))) {
+    if (is.null(names(image)) || anyDuplicated(names(image)) || !setequal(names(image), samples)) {
+      log_message("The named {.arg image} map must cover every sample exactly once", message_type = "error")
+    }
+  }
+  data <- sources <- stats::setNames(vector("list", length(samples)), samples)
+  for (sample in samples) {
+    local_image <- if (is.null(image) || is.null(names(image))) image else unname(image[[sample]])
+    resolved <- spatial_sample_coords(objects[[sample]], sample.by, local_image, coord.cols, space)
+    data[[sample]] <- resolved$data
+    if (length(objects) > 1L) {
+      data[[sample]]$cell_id <- paste(sample, data[[sample]]$cell_id, sep = "_")
+    }
+    sources[[sample]] <- resolved$sources[[sample]]
+    sources[[sample]]$input_image <- sources[[sample]]$image
+    sources[[sample]]$selection_namespace <- "input_sample"
+  }
+  data <- do.call(rbind, unname(data))
+  rownames(data) <- data$cell_id
+  list(data = data, sources = sources)
+}
+
+
+spatial_integration_features <- function(features, expr, srt_list, assay) {
+  common <- Reduce(
+    intersect,
+    lapply(srt_list, function(x) rownames(x[[assay]]))
+  )
+  if (!is.null(features)) {
+    common <- intersect(unique(features), common)
+  }
+  common <- intersect(common, rownames(expr))
+  if (length(common) == 0L) {
+    log_message(
+      "No requested {.arg features} are shared across spatial samples",
+      message_type = "error"
+    )
+  }
+  common
+}
+
+spatial_integration_features_merged <- function(features, expr, srt, assay) {
+  common <- intersect(rownames(srt[[assay]]), rownames(expr))
+  if (!is.null(features)) {
+    common <- intersect(unique(features), common)
+  }
+  if (length(common) == 0L) {
+    log_message(
+      "No requested {.arg features} are available in the merged spatial object",
+      message_type = "error"
+    )
+  }
+  common
+}
+
+spatial_integration_sparse_matrix <- function(mat) {
+  if (!inherits(mat, "Matrix")) {
+    mat <- Matrix::Matrix(mat, sparse = TRUE)
+  }
+  if (!inherits(mat, "dgCMatrix")) {
+    mat <- methods::as(mat, "dgCMatrix")
+  }
+  Matrix::drop0(mat)
+}
+
+spatial_integration_run_backend <- function(method, input, verbose = TRUE, ...) {
+  if (!identical(method, "PRECAST")) {
+    log_message("Unsupported spatial integration method {.val {method}}", message_type = "error")
+  }
+  params <- list(...)
+  validate_named_list(params, "...")
+  allowed <- c("create_params", "adj_params", "par_params", "run_params", "select_params")
+  if (length(setdiff(names(params), allowed))) {
+    log_message("PRECAST arguments must be supplied in create_params, adj_params, par_params, run_params or select_params", message_type = "error")
+  }
+  for (name in names(params)) validate_named_list(params[[name]], name)
+  standard_spatial_fixed_args(params$create_params, c("seuList", "customGenelist"))
+  standard_spatial_fixed_args(params$adj_params, "PRECASTObj")
+  standard_spatial_fixed_args(params$par_params, "PRECASTObj")
+  standard_spatial_fixed_args(params$run_params, "PRECASTObj")
+  standard_spatial_fixed_args(params$select_params, "obj")
+  adj_params <- params$adj_params %||% list()
+  adj_params$type <- adj_params$type %||% "fixed_number"
+  adj_params$type <- match.arg(adj_params$type, c("fixed_number", "fixed_distance"))
+  if (adj_params$type == "fixed_number") {
+    adj_params$number <- adj_params$number %||% 6L
+    number <- adj_params$number
+    if (!is.numeric(number) || length(number) != 1L || !is.finite(number) ||
+        number < 1 || number != floor(number)) {
+      log_message("{.emph adj_params$number} must be a positive integer", message_type = "error")
+    }
+  } else if (tolower(adj_params$platform %||% "Visium") %in% c("visium", "st")) {
+    log_message(
+      "PRECAST fixed_distance Visium/ST requires array indices, not analysis coordinates; use fixed_number or platform = 'Other_SRT'",
+      message_type = "error"
+    )
+  }
+  check_r("feiyoung/PRECAST", verbose = FALSE)
+  create_fun <- get_namespace_fun("PRECAST", "CreatePRECASTObject")
+  par_fun <- get_namespace_fun("PRECAST", "AddParSetting")
+  run_fun <- get_namespace_fun("PRECAST", "PRECAST")
+  select_fun <- get_namespace_fun("PRECAST", "SelectModel")
+  # PRECAST reads counts from each object's default assay. Build those objects
+  # from the selected matrix instead of letting the caller's defaults leak in.
+  backend_samples <- lapply(input$samples, function(sample) {
+    counts <- input$expr_list[[sample]]
+    cd <- input$coords_list[[sample]][colnames(counts), , drop = FALSE]
+    metadata <- data.frame(row = cd$y, col = cd$x, row.names = colnames(counts))
+    SeuratObject::CreateSeuratObject(counts = counts, assay = input$assay,
+      meta.data = metadata, project = sample)
+  })
+  names(backend_samples) <- input$samples
+  obj <- spatial_integration_call(
+    create_fun,
+    utils::modifyList(
+      list(
+        seuList = backend_samples,
+        project = "spatial_integration",
+        customGenelist = input$features
+      ),
+      params$create_params %||% list()
+    )
+  )
+  spatial_integration_validate_neighbor_count(obj, adj_params)
+  obj <- spatial_integration_set_precast_adjacency(obj, input, adj_params)
+  edge_counts <- spatial_integration_validate_adjacency(obj)
+  obj <- spatial_integration_call(
+    par_fun,
+    c(list(PRECASTObj = obj), params$par_params %||% list())
+  )
+  obj <- spatial_integration_call(
+    run_fun,
+    c(list(PRECASTObj = obj), params$run_params %||% list())
+  )
+  obj <- spatial_integration_call(
+    select_fun,
+    c(list(obj = obj), params$select_params %||% list())
+  )
+  result <- spatial_integration_extract_precast(obj, input)
+  result$backend_parameters <- utils::modifyList(params, list(adj_params = adj_params))
+  result$adjacency_builder <- if (adj_params$type == "fixed_number") {
+    "scop::spatial_graph_compute"
+  } else "PRECAST::AddAdjList"
+  result$adjacency_summary <- edge_counts
+  result$backend_version <- tryCatch(as.character(utils::packageVersion("PRECAST")),
+    error = function(e) NA_character_)
+  result
+}
+
+spatial_integration_validate_neighbor_count <- function(object, adj_params) {
+  if (adj_params$type == "fixed_number") {
+    sizes <- vapply(object@seulist, ncol, numeric(1))
+    if (!length(sizes) || any(sizes < 2 | sizes <= adj_params$number)) {
+      log_message("PRECAST fixed_number requires fewer neighbors than retained spots in every sample", message_type = "error")
+    }
+  }
+  invisible(NULL)
+}
+
+spatial_integration_set_precast_adjacency <- function(object, input, adj_params) {
+  if (adj_params$type != "fixed_number") {
+    return(spatial_integration_call(get_namespace_fun("PRECAST", "AddAdjList"),
+      c(list(PRECASTObj = object), adj_params)))
+  }
+  if (length(setdiff(names(adj_params), c("type", "number", "platform")))) {
+    log_message("{.emph fixed_number} adjacency accepts only type, number and platform", message_type = "error")
+  }
+  # Native PRECAST fixed_number restricts candidates along one axis. Use the
+  # shared exact KNN graph so rotation and long rows cannot omit closer spots.
+  object@AdjList <- lapply(seq_along(object@seulist), function(i) {
+    cells <- colnames(object@seulist[[i]])
+    coords <- input$coords_list[[i]][cells, , drop = FALSE]
+    if (anyNA(coords$cell_id) || !identical(as.character(coords$cell_id), cells)) {
+      log_message("PRECAST graph coordinates must align with retained spot IDs", message_type = "error")
+    }
+    graph <- spatial_graph_compute(coords, method = "knn", k = adj_params$number,
+      directed = TRUE, weight = "binary")
+    # PRECAST consumes the neighbors of spot i from column i, not row i.
+    Matrix::sparseMatrix(i = graph$edges$to, j = graph$edges$from, x = 1,
+      dims = c(length(cells), length(cells)), dimnames = list(cells, cells))
+  })
+  names(object@AdjList) <- names(object@seulist)
+  object
+}
+
+spatial_integration_validate_adjacency <- function(object) {
+  samples <- object@seulist
+  graphs <- object@AdjList
+  if (!is.list(graphs) || length(graphs) != length(samples) || !length(graphs)) {
+    log_message("PRECAST must return one adjacency matrix per sample", message_type = "error")
+  }
+  edges <- vapply(seq_along(samples), function(i) {
+    graph <- graphs[[i]]
+    n <- ncol(samples[[i]])
+    values <- if (inherits(graph, "sparseMatrix")) graph@x else as.vector(graph)
+    if (!(is.matrix(graph) || inherits(graph, "Matrix")) ||
+        !all(dim(graph) == c(n, n)) || n < 2L ||
+        !is.numeric(values) || any(!is.finite(values)) || any(values < 0) || any(Matrix::diag(graph) != 0)) {
+      log_message("PRECAST returned an invalid adjacency matrix", message_type = "error")
+    }
+    count <- Matrix::nnzero(graph)
+    if (!is.finite(count) || count == 0) {
+      log_message("PRECAST adjacency has no edges; check coordinates and adj_params before training", message_type = "error")
+    }
+    as.double(count)
+  }, numeric(1))
+  stats::setNames(edges, names(samples))
+}
+
+spatial_integration_extract_precast <- function(raw_result, input) {
+  clusters <- raw_result@resList$cluster
+  embeddings <- raw_result@resList$hZ
+  if (!is.list(clusters) || length(clusters) != length(input$samples)) {
+    return(list(raw_result = raw_result))
+  }
+  domains <- character()
+  embedding <- NULL
+  for (i in seq_along(input$samples)) {
+    sample <- input$samples[[i]]
+    cells <- colnames(raw_result@seulist[[i]])
+    if (!setequal(cells, colnames(input$srt_list[[sample]]))) {
+      log_message(
+        "PRECAST filtering changed the sample's spots; adjust create_params to retain the selected input spots",
+        message_type = "error"
+      )
+    }
+    cluster <- as.vector(clusters[[i]])
+    if (length(cluster) != length(cells)) {
+      log_message(
+        "PRECAST domains do not match the spots in sample {.val {sample}}",
+        message_type = "error"
+      )
+    }
+    cluster <- as.character(cluster)
+    names(cluster) <- cells
+    domains <- c(domains, cluster)
+    if (is.list(embeddings) && length(embeddings) == length(input$samples)) {
+      sample_embedding <- as.matrix(embeddings[[i]])
+      if (nrow(sample_embedding) != length(cells)) {
+        log_message(
+          "PRECAST embeddings do not match the spots in sample {.val {sample}}",
+          message_type = "error"
+        )
+      }
+      rownames(sample_embedding) <- cells
+      embedding <- rbind(embedding, sample_embedding)
+    }
+  }
+  list(
+    embedding = embedding,
+    domains = domains,
+    raw_result = raw_result
+  )
+}
+
+spatial_integration_standardize_result <- function(backend, input, method) {
+  embedding <- spatial_integration_standardize_embedding(backend$embedding, input$cells)
+  domains <- spatial_integration_standardize_named_vector(backend$domains, input$cells)
+  aligned_coords <- spatial_integration_standardize_coords(
+    coords = backend$aligned_coords,
+    cells = input$cells
+  )
+  if (is.null(embedding) && is.null(domains) && is.null(aligned_coords)) {
+    log_message(
+      "{.pkg {method}} did not return embeddings, spatial domains, or aligned coordinates that can be matched to Seurat cells",
+      message_type = "error"
+    )
+  }
+  list(
+    embedding = embedding,
+    domains = domains,
+    aligned_coords = aligned_coords,
+    features = input$features,
+    backend_parameters = backend$backend_parameters,
+    adjacency_summary = backend$adjacency_summary,
+    adjacency_builder = backend$adjacency_builder,
+    backend_version = backend$backend_version,
+    raw_result = backend$raw_result %||% backend
+  )
+}
+
+spatial_integration_standardize_embedding <- function(embedding, cells) {
+  if (is.null(embedding)) {
+    return(NULL)
+  }
+  embedding <- as.matrix(embedding)
+  if (!is.numeric(embedding) || !ncol(embedding) || any(!is.finite(embedding))) {
+    log_message("Backend embedding must contain finite numeric values and at least one dimension", message_type = "error")
+  }
+  if (is.null(rownames(embedding))) {
+    if (nrow(embedding) != length(cells)) {
+      log_message(
+        "Backend embedding must have row names or one row per Seurat cell",
+        message_type = "error"
+      )
+    }
+    rownames(embedding) <- cells
+  } else {
+    ids <- rownames(embedding)
+    if (anyNA(ids) || any(!nzchar(ids)) || anyDuplicated(ids) ||
+      !setequal(ids, cells)) {
+      log_message(
+        "Backend embedding row IDs must match Seurat cells exactly",
+        message_type = "error"
+      )
+    }
+  }
+  cells_use <- cells[cells %in% rownames(embedding)]
+  if (length(cells_use) == 0L) {
+    log_message(
+      "Backend embedding rows could not be matched to Seurat cells",
+      message_type = "error"
+    )
+  }
+  embedding <- embedding[cells_use, , drop = FALSE]
+  storage.mode(embedding) <- "double"
+  if (is.null(colnames(embedding))) {
+    colnames(embedding) <- paste0("dim", seq_len(ncol(embedding)))
+  }
+  embedding
+}
+
+spatial_integration_standardize_named_vector <- function(x, cells) {
+  if (is.null(x)) {
+    return(NULL)
+  }
+  source_names <- names(x)
+  if (is.data.frame(x) || is.matrix(x)) {
+    source_names <- rownames(x)
+    x <- x[, 1L, drop = TRUE]
+  }
+  x <- as.character(x)
+  if (anyNA(x) || any(!nzchar(trimws(x)))) {
+    log_message("Backend domain labels must be non-missing and non-empty", message_type = "error")
+  }
+  if (is.null(source_names) || !length(source_names)) {
+    if (length(x) != length(cells)) {
+      log_message(
+        "Backend domain labels must be named or have one value per Seurat cell",
+        message_type = "error"
+      )
+    }
+    source_names <- cells
+  }
+  if (length(source_names) != length(x) || anyNA(source_names) || any(!nzchar(source_names)) || anyDuplicated(source_names)) {
+    log_message(
+      "Backend domain labels must have one unique non-empty identifier per value",
+      message_type = "error"
+    )
+  }
+  names(x) <- source_names
+  extra <- setdiff(source_names, cells)
+  missing <- setdiff(cells, source_names)
+  if (length(extra) || length(missing)) {
+    log_message(
+      "Backend domain labels do not match Seurat cells; missing: {.val {missing}}, extra: {.val {extra}}",
+      message_type = "error"
+    )
+  }
+  cells_use <- cells
+  if (length(cells_use) == 0L) {
+    log_message(
+      "Backend domain labels could not be matched to Seurat cells",
+      message_type = "error"
+    )
+  }
+  x[cells_use]
+}
+
+spatial_integration_standardize_coords <- function(coords, cells) {
+  if (is.null(coords)) {
+    return(NULL)
+  }
+  coords <- as.data.frame(coords, check.names = FALSE)
+  if (ncol(coords) < 2L) {
+    log_message(
+      "Backend aligned coordinates must contain at least two columns",
+      message_type = "error"
+    )
+  }
+  if (is.null(rownames(coords))) {
+    if (nrow(coords) != length(cells)) {
+      log_message(
+        "Backend aligned coordinates must have row names or one row per Seurat cell",
+        message_type = "error"
+      )
+    }
+    rownames(coords) <- cells
+  } else {
+    ids <- rownames(coords)
+    if (anyNA(ids) || any(!nzchar(ids)) || anyDuplicated(ids) ||
+      !setequal(ids, cells)) {
+      log_message(
+        "Backend aligned-coordinate row IDs must match Seurat cells exactly",
+        message_type = "error"
+      )
+    }
+  }
+  cells_use <- cells[cells %in% rownames(coords)]
+  if (length(cells_use) == 0L) {
+    log_message(
+      "Backend aligned coordinates could not be matched to Seurat cells",
+      message_type = "error"
+    )
+  }
+  out <- coords[cells_use, seq_len(2L), drop = FALSE]
+  colnames(out) <- c("x", "y")
+  out$x <- as.numeric(out$x)
+  out$y <- as.numeric(out$y)
+  if (any(!is.finite(out$x)) || any(!is.finite(out$y))) {
+    log_message("Backend aligned coordinates must be finite numeric values", message_type = "error")
+  }
+  out
+}
+
+spatial_integration_apply_result <- function(
+  srt,
+  result,
+  method,
+  sample.by,
+  assay,
+  layer,
+  image,
+  coord.cols,
+  coordinate_space,
+  reduction.name,
+  cluster_colname,
+  tool_name,
+  store_results,
+  store_object = TRUE,
+  coordinate_sources = NULL
+) {
+  previous_index <- srt@tools[[tool_name]]$result_index
+  spatial_check_identity_columns(srt, tool_name,
+    c(cluster_colname, paste0(reduction.name, c("_aligned_x", "_aligned_y"))))
+  all_cells <- colnames(srt)
+  if (!is.null(result$domains)) {
+    domain_full <- rep(NA_character_, length(all_cells))
+    names(domain_full) <- all_cells
+    domain_full[names(result$domains)] <- as.character(result$domains)
+    srt[[cluster_colname]] <- domain_full
+  }
+
+  aligned_coord_cols <- NULL
+  if (!is.null(result$aligned_coords)) {
+    aligned_coord_cols <- paste0(reduction.name, c("_aligned_x", "_aligned_y"))
+    x_full <- rep(NA_real_, length(all_cells))
+    y_full <- rep(NA_real_, length(all_cells))
+    names(x_full) <- names(y_full) <- all_cells
+    x_full[rownames(result$aligned_coords)] <- result$aligned_coords$x
+    y_full[rownames(result$aligned_coords)] <- result$aligned_coords$y
+    srt[[aligned_coord_cols[1L]]] <- x_full
+    srt[[aligned_coord_cols[2L]]] <- y_full
+  }
+
+  if (!is.null(result$embedding)) {
+    key <- spatial_integration_reduction_key(reduction.name)
+    embedding_full <- matrix(
+      NA_real_,
+      nrow = length(all_cells),
+      ncol = ncol(result$embedding),
+      dimnames = list(all_cells, paste0(key, seq_len(ncol(result$embedding))))
+    )
+    embedding_full[rownames(result$embedding), ] <- result$embedding
+    srt[[reduction.name]] <- SeuratObject::CreateDimReducObject(
+      embeddings = embedding_full,
+      key = key,
+      assay = assay
+    )
+  }
+
+  parameters <- list(
+    method = method,
+    sample.by = sample.by,
+    assay = assay,
+    layer = layer,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space,
+    coordinate_sources = coordinate_sources,
+    backend_parameters = result$backend_parameters,
+    backend_version = result$backend_version,
+    adjacency_summary = result$adjacency_summary,
+    adjacency_builder = result$adjacency_builder,
+    reduction.name = reduction.name,
+    cluster_colname = cluster_colname,
+    aligned_coord_cols = aligned_coord_cols,
+    store_object = store_object,
+    tool_name = tool_name
+  )
+  sample_summary <- as.data.frame(table(srt@meta.data[[sample.by]]), stringsAsFactors = FALSE)
+  colnames(sample_summary) <- c("sample", "count")
+  method_bundle <- list(
+    embedding = result$embedding,
+    domains = result$domains,
+    aligned_coords = result$aligned_coords,
+    summary = list(
+      n_cells = length(all_cells),
+      domains = spatial_domain_summary(result$domains),
+      samples = sample_summary
+    ),
+    parameters = parameters
+  )
+  if (isTRUE(store_object)) {
+    method_bundle$raw_result <- result$raw_result
+  }
+  method_bundle <- spatial_tag_coordinate_contract(method_bundle)
+  if (isTRUE(store_results)) {
+    old <- srt@tools[[tool_name]] %||% list()
+    methods_store <- old$methods %||% list()
+    methods_store[[method]] <- method_bundle
+    srt@tools[[tool_name]] <- list(
+      active_method = method,
+      methods = methods_store,
+      parameters = parameters,
+      summary = method_bundle$summary,
+      features = result$features,
+      samples = unique(as.character(srt@meta.data[[sample.by]])),
+      cells = all_cells
+    )
+    srt@tools[[tool_name]]$result_index <- list(method = method,
+      cluster_colname = cluster_colname, cells = names(result$domains))
+    srt <- spatial_record_cell_identity(srt, tool_name, previous_index,
+      protected_columns = aligned_coord_cols)
+    srt@tools[[tool_name]]$methods[[method]]$result_index <- srt@tools[[tool_name]]$result_index
+    srt@tools[[tool_name]] <- spatial_tag_coordinate_contract(srt@tools[[tool_name]])
+  }
+  srt
+}
+
+spatial_integration_get_method_bundle <- function(bundle, method) {
+  method_bundle <- bundle$methods[[method]]
+  if (is.null(method_bundle)) {
+    log_message(
+      "Cannot find spatial integration method {.val {method}} in stored results",
+      message_type = "error"
+    )
+  }
+  method_bundle
+}
+
+spatial_integration_composition_plot <- function(
+  srt,
+  group.by,
+  sample.by,
+  palette,
+  palcolor,
+  theme_use,
+  theme_args
+) {
+  if (is.null(sample.by) || !sample.by %in% colnames(srt@meta.data)) {
+    log_message(
+      "A valid {.arg sample.by} metadata column is required for composition plots",
+      message_type = "error"
+    )
+  }
+  dat <- srt@meta.data[, c(sample.by, group.by), drop = FALSE]
+  dat <- dat[!is.na(dat[[sample.by]]) & !is.na(dat[[group.by]]), , drop = FALSE]
+  colnames(dat) <- c("sample", "domain")
+  if (nrow(dat) == 0L) {
+    log_message(
+      "No non-missing sample/domain labels are available for composition plotting",
+      message_type = "error"
+    )
+  }
+  tab <- as.data.frame(table(dat$sample, dat$domain), stringsAsFactors = FALSE)
+  colnames(tab) <- c("sample", "domain", "count")
+  tab <- tab[tab$count > 0, , drop = FALSE]
+  tab$fraction <- stats::ave(tab$count, tab$sample, FUN = function(x) x / sum(x))
+  cols <- spatial_palette_colors(unique(as.character(tab$domain)), palette = palette, palcolor = palcolor)
+  ggplot2::ggplot(tab, ggplot2::aes(x = .data$sample, y = .data$fraction, fill = .data$domain)) +
+    ggplot2::geom_col(width = 0.75, color = "white", linewidth = 0.2) +
+    ggplot2::scale_fill_manual(values = cols) +
+    ggplot2::scale_y_continuous(
+      labels = scales::percent_format(accuracy = 1),
+      expand = ggplot2::expansion(mult = c(0, 0.02))
+    ) +
+    ggplot2::labs(x = sample.by, y = "Fraction", fill = group.by) +
+    apply_plot_theme(theme_use, theme_args)
+}
+
+spatial_integration_alignment_plot <- function(
+  srt,
+  group.by,
+  sample.by,
+  parameters,
+  palette,
+  palcolor,
+  theme_use,
+  theme_args
+) {
+  aligned_cols <- parameters$aligned_coord_cols
+  if (
+    is.null(aligned_cols) ||
+      !all(aligned_cols %in% colnames(srt@meta.data))
+  ) {
+    log_message(
+      "Alignment plots require stored raw and aligned coordinate columns",
+      message_type = "error"
+    )
+  }
+  meta <- srt@meta.data
+  image_map <- spatial_integration_plot_images(srt, sample.by, parameters)
+  raw <- spatial_sample_coords(srt, sample.by, image = image_map,
+    coord.cols = parameters$coord.cols, coordinate_space = parameters$coordinate_space %||% "raw")$data
+  dat_raw <- data.frame(
+    x = raw$x,
+    y = raw$y,
+    group = meta[[group.by]],
+    sample = if (!is.null(sample.by) && sample.by %in% colnames(meta)) meta[[sample.by]] else "All",
+    coordinate = "Raw",
+    stringsAsFactors = FALSE
+  )
+  dat_aligned <- data.frame(
+    x = meta[[aligned_cols[1L]]],
+    y = meta[[aligned_cols[2L]]],
+    group = meta[[group.by]],
+    sample = if (!is.null(sample.by) && sample.by %in% colnames(meta)) meta[[sample.by]] else "All",
+    coordinate = "Aligned",
+    stringsAsFactors = FALSE
+  )
+  dat <- rbind(dat_raw, dat_aligned)
+  dat <- dat[is.finite(dat$x) & is.finite(dat$y), , drop = FALSE]
+  if (nrow(dat) == 0L) {
+    log_message(
+      "No finite raw/aligned coordinates are available for plotting",
+      message_type = "error"
+    )
+  }
+  dat$group <- spatial_plot_factor(dat$group)
+  cols <- spatial_palette_colors(levels(dat$group), palette = palette, palcolor = palcolor)
+  ggplot2::ggplot(dat, ggplot2::aes(x = .data$x, y = .data$y, fill = .data$group)) +
+    ggplot2::geom_point(shape = 21, color = "grey20", stroke = 0.1, size = 1.2, alpha = 0.9) +
+    ggplot2::scale_fill_manual(values = cols, na.value = "grey80") +
+    ggplot2::facet_grid(.data$sample ~ .data$coordinate) +
+    ggplot2::coord_equal() +
+    ggplot2::labs(x = NULL, y = NULL, fill = group.by) +
+    apply_plot_theme(theme_use, theme_args)
+}
+
+spatial_integration_call <- function(fun, args) {
+  args <- args[!vapply(args, is.null, logical(1))]
+  fmls <- tryCatch(names(formals(fun)), error = function(e) NULL)
+  if (!is.null(fmls) && !"..." %in% fmls) {
+    args <- args[names(args) %in% fmls]
+  }
+  do.call(fun, args)
+}
+
+spatial_integration_resolve_sample_by <- function(object, sample.by) {
+  if (!is.null(sample.by)) {
+    validate_scalar_string(sample.by, "sample.by")
+    return(sample.by)
+  }
+  if (inherits(object, "Seurat")) {
+    log_message(
+      "{.arg sample.by} is required when {.arg object} is a merged {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  ".spatial_integration_sample"
+}
+
+spatial_integration_reduction_key <- function(reduction.name) {
+  key <- gsub("[^A-Za-z0-9]", "", reduction.name)
+  if (!nzchar(key)) {
+    key <- "SpatialIntegration"
+  }
+  paste0(key, "_")
+}

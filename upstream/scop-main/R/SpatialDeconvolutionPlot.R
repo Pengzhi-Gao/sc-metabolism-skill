@@ -1,0 +1,215 @@
+#' @title Plot stored spatial deconvolution proportions
+#'
+#' @description
+#' Plot spot-by-cell-type proportions stored by [RunRCTD()], [RunCARD()],
+#' [RunSPOTlight()]. The plot reads the stored result
+#' directly from `srt@tools[[tool_name]]` and never reruns a deconvolution
+#' backend. [RunCSIDE()] is intentionally excluded because its output
+#' represents differential or context effects rather than cell-type
+#' proportions.
+#'
+#' @md
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A spatial `Seurat` object containing a stored deconvolution result.
+#' @param tool_name Explicit non-empty key in `srt@tools`. Results are never
+#' discovered implicitly.
+#' @param cell_types Optional cell types to display. The default uses all stored
+#' cell types.
+#' @param plot_type Plot proportions as separate point maps, one dominant-type
+#' map derived from the stored proportions, or one spot-level pie map.
+#' @param combine Whether to combine point or dominant maps. If `FALSE`,
+#' return a named list.
+#' @param nrow,ncol,byrow Point-map layout controls. When both dimensions are
+#' `NULL`, a near-square layout with at most three columns is used.
+#' @details
+#' Point maps share a zero-to-one scale. A cell type with no measured values
+#' produces an informative empty panel instead of aborting the other maps.
+#' For dominant and pie maps, `cell_types` selects the types participating in
+#' the displayed comparison; pie fractions are relative to those selected types.
+#' @param image.scale Image scale factor matching the selected raster.
+#' @param ... Additional arguments passed to [SpatialSpotPlot()].
+#'
+#' @return A `ggplot`, `patchwork`, or named list of `ggplot` objects.
+#' @export
+#'
+#' @examples
+#' data(visium_human_pancreas_sub)
+#' data(panc8_sub)
+#' reference <- panc8_sub[, panc8_sub$celltype %in% c("ductal", "alpha", "beta")]
+#' reference <- Seurat::FindVariableFeatures(reference, nfeatures = 300, verbose = FALSE)
+#' features <- head(intersect(
+#'   SeuratObject::VariableFeatures(reference),
+#'   rownames(visium_human_pancreas_sub)
+#' ), 300)
+#' spatial <- RunRCTD(
+#'   visium_human_pancreas_sub,
+#'   reference = reference,
+#'   reference_label = "celltype",
+#'   features = features,
+#'   assay = "Spatial",
+#'   reference_assay = "RNA",
+#'   layer = "counts",
+#'   reference_layer = "counts",
+#'   rctd_mode = "full",
+#'   max_cores = 1,
+#'   verbose = FALSE
+#' )
+#' SpatialDeconvolutionPlot(spatial, tool_name = "RCTD", plot_type = "dominant")
+SpatialDeconvolutionPlot <- function(
+  object,
+  tool_name = NULL,
+  cell_types = NULL,
+  plot_type = c("point", "dominant", "pie"),
+  combine = TRUE,
+  nrow = NULL,
+  ncol = NULL,
+  byrow = TRUE,
+  ...,
+  image.scale = c("lowres", "hires"),
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  if (!inherits(srt, "Seurat")) {
+    log_message("{.arg srt} must be a {.cls Seurat} object", message_type = "error")
+  }
+  plot_type <- match.arg(plot_type)
+  image.scale <- match.arg(image.scale)
+  if (
+    is.null(tool_name) || !is.character(tool_name) || length(tool_name) != 1L ||
+      is.na(tool_name) || !nzchar(tool_name)
+  ) {
+    log_message(
+      "{.arg tool_name} must be an explicit non-empty key in {.code srt@tools}",
+      message_type = "error"
+    )
+  }
+  stored <- srt@tools[[tool_name]]
+  if (!is.list(stored)) {
+    log_message(
+      "Stored result {.val {tool_name}} is not a spatial deconvolution result",
+      message_type = "error"
+    )
+  }
+  if (spatial_deconvolution_requires_coordinate_contract(stored)) {
+    spatial_require_coordinate_contract(stored, paste0(tool_name, " producer"))
+  }
+  proportions <- spatial_deconvolution_proportions(
+    stored$proportions %||% stored$weights,
+    spot_ids = colnames(srt),
+    tool_name = tool_name
+  )
+  if (!is.null(cell_types)) {
+    if (
+      !is.character(cell_types) || length(cell_types) == 0L ||
+        anyNA(cell_types) || any(!nzchar(cell_types)) || anyDuplicated(cell_types)
+    ) {
+      log_message("{.arg cell_types} must contain unique non-empty names", message_type = "error")
+    }
+    missing_types <- setdiff(cell_types, colnames(proportions))
+    if (length(missing_types) > 0L) {
+      log_message("Unknown {.arg cell_types}: {.val {missing_types}}", message_type = "error")
+    }
+    proportions <- proportions[, cell_types, drop = FALSE]
+  }
+  dots <- list(...)
+  if (identical(plot_type, "pie")) {
+    return(SpatialSpotPlot(
+      srt,
+      values = proportions,
+      plot_type = "pie",
+      image.scale = image.scale,
+      ...
+    ))
+  }
+  if (identical(plot_type, "dominant")) {
+    dominant <- spatial_deconvolution_dominant(proportions)
+    return(SpatialSpotPlot(
+      srt,
+      values = stats::setNames(dominant, rownames(proportions)),
+      plot_type = "point",
+      image.scale = image.scale,
+      combine = combine,
+      nrow = nrow,
+      ncol = ncol,
+      byrow = byrow,
+      ...
+    ))
+  }
+  spatial_matrix_point_plot(
+    srt = srt,
+    values = proportions,
+    value_names = colnames(proportions),
+    value_kind = "proportion",
+    legend_title = dots$legend.title,
+    plot_title = paste0(tool_name, " proportions"),
+    combine = combine,
+    nrow = nrow,
+    ncol = ncol,
+    byrow = byrow,
+    plot_args = c(
+      list(image.scale = image.scale),
+      dots
+    )
+  )
+}
+
+spatial_deconvolution_requires_coordinate_contract <- function(stored) {
+  isTRUE(stored$parameters$coordinate_dependent) ||
+    !is.null(stored$backend_api) ||
+    !is.null(stored$backend_package)
+}
+
+spatial_deconvolution_proportions <- function(x, spot_ids, tool_name) {
+  if (is.null(x) || (!is.matrix(x) && !inherits(x, "Matrix") && !is.data.frame(x))) {
+    log_message(
+      "Stored result {.val {tool_name}} does not contain matrix-like proportions",
+      message_type = "error"
+    )
+  }
+  x <- as.matrix(x)
+  if (nrow(x) == 0L || ncol(x) == 0L) {
+    log_message("Stored proportions are empty", message_type = "error")
+  }
+  if (!is.numeric(x)) {
+    log_message("Stored proportions must be numeric", message_type = "error")
+  }
+  valid_names <- function(nm) {
+    !is.null(nm) && !anyNA(nm) && all(nzchar(nm)) && !anyDuplicated(nm)
+  }
+  if (!valid_names(rownames(x))) {
+    log_message("Stored proportions must have unique, non-missing spot names", message_type = "error")
+  }
+  if (!valid_names(colnames(x))) {
+    log_message("Stored proportions must have unique, non-missing cell-type names", message_type = "error")
+  }
+  missing_spots <- setdiff(spot_ids, rownames(x))
+  extra_spots <- setdiff(rownames(x), spot_ids)
+  if (length(missing_spots) > 0L || length(extra_spots) > 0L) {
+    log_message(
+      "Stored proportions are stale or incomplete: {.val {length(missing_spots)}} missing and {.val {length(extra_spots)}} unknown spots",
+      message_type = "error"
+    )
+  }
+  finite <- x[is.finite(x)]
+  if (any(is.infinite(x))) {
+    log_message("Stored proportions cannot contain infinite values", message_type = "error")
+  }
+  if (length(finite) > 0L && (any(finite < 0) || any(finite > 1 + sqrt(.Machine$double.eps)))) {
+    log_message("Stored proportions must lie between zero and one", message_type = "error")
+  }
+  x[spot_ids, , drop = FALSE]
+}
+
+spatial_deconvolution_dominant <- function(proportions) {
+  out <- rep(NA_character_, nrow(proportions))
+  for (i in seq_len(nrow(proportions))) {
+    values <- proportions[i, ]
+    values[!is.finite(values)] <- NA_real_
+    if (all(is.na(values)) || max(values, na.rm = TRUE) <= 0) {
+      next
+    }
+    out[[i]] <- colnames(proportions)[which.max(replace(values, is.na(values), -Inf))]
+  }
+  factor(out, levels = colnames(proportions))
+}

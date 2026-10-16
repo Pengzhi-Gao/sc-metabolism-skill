@@ -1,0 +1,680 @@
+make_bayesspace_object <- function() {
+  counts <- matrix(
+    c(
+      3, 1, 0, 2,
+      0, 4, 1, 0,
+      2, 1, 3, 1
+    ),
+    nrow = 3,
+    byrow = TRUE,
+    dimnames = list(paste0("Gene", 1:3), paste0("Spot", 1:4))
+  )
+  srt <- Seurat::CreateSeuratObject(
+    counts = methods::as(Matrix::Matrix(counts, sparse = TRUE), "dgCMatrix")
+  )
+  srt$col <- c(0, 2, 1, 3)
+  srt$row <- c(0, 0, 1, 1)
+  srt
+}
+
+make_bayesspace_multi_image_object <- function() {
+  srt <- make_bayesspace_object()
+  assay <- SeuratObject::DefaultAssay(srt)
+  slice1 <- data.frame(
+    x = c(0, 2), y = c(0, 0),
+    row.names = c("Spot1", "Spot2")
+  )
+  slice2 <- data.frame(
+    x = c(1, 3), y = c(1, 1),
+    row.names = c("Spot3", "Spot4")
+  )
+  srt[["slice1"]] <- SeuratObject::CreateFOV(
+    slice1,
+    type = "centroids", assay = assay, key = "bs1_"
+  )
+  srt[["slice2"]] <- SeuratObject::CreateFOV(
+    slice2,
+    type = "centroids", assay = assay, key = "bs2_"
+  )
+  srt
+}
+
+make_bayesspace_visium_v1_object <- function() {
+  srt <- make_bayesspace_object()
+  scale_factors <- structure(
+    list(spot = 1, fiducial = 1, hires = 0.5, lowres = 0.25),
+    class = "scalefactors"
+  )
+  coordinates <- data.frame(
+    tissue = 1L,
+    row = c(10L, 10L, 11L, 11L),
+    col = c(4L, 6L, 5L, 7L),
+    imagerow = c(101.3, 99.8, 213.7, 210.2),
+    imagecol = c(52.1, 180.4, 61.9, 191.6),
+    row.names = colnames(srt)
+  )
+  srt[["slice"]] <- methods::new(
+    "VisiumV1",
+    image = array(1, dim = c(120, 140, 3)),
+    scale.factors = scale_factors,
+    coordinates = coordinates,
+    spot.radius = 0.1,
+    assay = SeuratObject::DefaultAssay(srt),
+    key = "bsv1_"
+  )
+  list(object = srt, coordinates = coordinates)
+}
+
+with_mock_bayesspace <- function(cluster_fun, code) {
+  testthat::local_mocked_bindings(
+    check_r = function(...) invisible(TRUE),
+    get_namespace_fun = function(package, name) {
+      expect_identical(package, "BayesSpace")
+      if (identical(name, "spatialCluster")) {
+        return(cluster_fun)
+      }
+      stop("unexpected BayesSpace function: ", name)
+    },
+    .package = "scop"
+  )
+  force(code)
+}
+
+mock_bayesspace_complete <- function(sce, ...) {
+  cdata <- as.data.frame(SummarizedExperiment::colData(sce))
+  cdata$spatial.cluster <- paste0("domain_", seq_len(nrow(cdata)) %% 2 + 1)
+  cdata$cluster.init <- paste0("init_", seq_len(nrow(cdata)) %% 2 + 1)
+  SummarizedExperiment::colData(sce) <- S4Vectors::DataFrame(cdata)
+  sce
+}
+
+bayesspace_receipt_plain <- function(messages) {
+  cli::ansi_strip(paste(messages, collapse = "\n"))
+}
+
+bayesspace_expect_receipt_plot_hint <- function(messages, expected_call) {
+  plain <- bayesspace_receipt_plain(messages)
+  expect_true(grepl(
+    paste0("Plot returned object `", expected_call, "`"),
+    plain,
+    fixed = TRUE
+  ))
+  expect_true(grepl("<returned_object>", expected_call, fixed = TRUE))
+  expect_false(grepl("srt", expected_call, fixed = TRUE))
+  invisible(plain)
+}
+
+test_that("RunBayesSpace validates output names and storage before backend work", {
+  backend_checks <- 0L
+  testthat::local_mocked_bindings(
+    check_r = function(...) {
+      backend_checks <<- backend_checks + 1L
+      stop("backend check reached")
+    },
+    get_namespace_fun = function(...) {
+      stop("backend should not run")
+    },
+    .package = "scop"
+  )
+  invalid <- list(
+    cluster_colname = list("", 1L),
+    init_colname = list("", 1L),
+    store_sce = list(1L, NA)
+  )
+  base_args <- list(
+    object = make_bayesspace_object(),
+    q = 2,
+    preprocess = FALSE,
+    verbose = FALSE
+  )
+  for (arg in names(invalid)) {
+    pattern <- if (identical(arg, "store_sce")) {
+      "store_sce.*TRUE or FALSE"
+    } else {
+      paste0(arg, ".*single non-empty string")
+    }
+    for (value in invalid[[arg]]) {
+      args <- base_args
+      args[[arg]] <- value
+      expect_error(do.call(RunBayesSpace, args), pattern)
+    }
+  }
+  expect_identical(backend_checks, 0L)
+
+  expect_error(
+    RunBayesSpace(
+      make_bayesspace_object(),
+      q = 2,
+      preprocess = FALSE,
+      init_colname = NULL,
+      verbose = FALSE
+    ),
+    "backend check reached"
+  )
+  expect_identical(backend_checks, 1L)
+})
+
+test_that("RunBayesSpace stores raw coordinate provenance and aligned cells", {
+  skip_if_not_installed("SingleCellExperiment")
+  srt <- make_bayesspace_object()
+  with_mock_bayesspace(mock_bayesspace_complete, {
+    out <- RunBayesSpace(
+      srt,
+      q = 2,
+      preprocess = FALSE,
+      store_sce = FALSE,
+      verbose = FALSE
+    )
+  })
+
+  result <- out@tools[["BayesSpace"]]
+  expect_identical(result$parameters$coordinate_space, "raw")
+  expect_identical(result$parameters$coord.cols, c("col", "row"))
+  expect_identical(result$parameters$image, NA_character_)
+  expect_identical(result$cells, colnames(out))
+  expect_identical(result$coords$cell_id, colnames(out))
+  expect_identical(rownames(result$colData), colnames(out))
+  expect_false("sce" %in% names(result))
+  expect_false(anyNA(out$BayesSpace_cluster))
+})
+
+test_that("RunBayesSpace infers grids from custom-only parsed coordinates", {
+  skip_if_not_installed("SingleCellExperiment")
+  coord_cols <- c('spot x "custom"', "spot y\\custom")
+  for (platform in c("Visium", "VisiumHD", "ST")) {
+    srt <- make_bayesspace_object()
+    srt$col <- NULL
+    srt$row <- NULL
+    pixel_x <- if (platform == "Visium") c(100, 300, 200, 400) else c(100, 300, 100, 300)
+    pixel_y <- c(800, 800, 900, 900)
+    array_col <- if (platform == "Visium") c(0L, 2L, 1L, 3L) else c(0L, 1L, 0L, 1L)
+    array_row <- c(0L, 0L, 1L, 1L)
+    custom_coords <- data.frame(
+      x = factor(as.character(pixel_x), levels = rev(unique(as.character(pixel_x)))),
+      y = as.character(pixel_y),
+      row.names = colnames(srt)
+    )
+    colnames(custom_coords) <- coord_cols
+    srt <- SeuratObject::AddMetaData(srt, metadata = custom_coords)
+    metadata_before <- srt[[]]
+    backend_calls <- 0L
+    cluster_fun <- function(sce, ...) {
+      backend_calls <<- backend_calls + 1L
+      cdata <- as.data.frame(SummarizedExperiment::colData(sce))
+      expect_identical(rownames(cdata), colnames(srt))
+      expect_identical(cdata$array_col, array_col)
+      expect_identical(cdata$array_row, array_row)
+      expect_identical(cdata$col, array_col)
+      expect_identical(cdata$row, array_row)
+      expect_identical(cdata$pxl_col_in_fullres, pixel_x)
+      expect_identical(cdata$pxl_row_in_fullres, pixel_y)
+      mock_bayesspace_complete(sce)
+    }
+    out <- with_mock_bayesspace(cluster_fun, {
+      RunBayesSpace(
+        srt,
+        q = 2,
+        platform = platform,
+        coord.cols = coord_cols,
+        preprocess = FALSE,
+        verbose = FALSE
+      )
+    })
+    expect_identical(backend_calls, 1L)
+    result <- out@tools[["BayesSpace"]]
+    expect_identical(result$parameters$coord.cols, coord_cols)
+    expect_identical(result$coords$x, pixel_x)
+    expect_identical(result$coords$y, pixel_y)
+    expect_identical(result$coords$cell_id, colnames(srt))
+    expect_identical(srt[[]], metadata_before)
+  }
+})
+
+test_that("RunBayesSpace selected metadata overrides conflicting coordinate names", {
+  skip_if_not_installed("SingleCellExperiment")
+  for (include_array_coords in c(FALSE, TRUE)) {
+    srt <- make_bayesspace_object()
+    srt$col <- c(20, 22, 21, 23)
+    srt$row <- c(10, 10, 11, 11)
+    srt$x <- c(1000, 1200, 1000, 1200)
+    srt$y <- c(2000, 2000, 2200, 2200)
+    if (include_array_coords) {
+      srt$array_col <- c(40L, 42L, 41L, 43L)
+      srt$array_row <- c(30L, 30L, 31L, 31L)
+    }
+    srt$custom_x <- c(400, 200, 300, 100)
+    srt$custom_y <- c(900, 900, 800, 800)
+    backend_calls <- 0L
+    cluster_fun <- function(sce, ...) {
+      backend_calls <<- backend_calls + 1L
+      cdata <- as.data.frame(SummarizedExperiment::colData(sce))
+      expect_identical(cdata$array_col, c(3L, 1L, 2L, 0L))
+      expect_identical(cdata$array_row, c(1L, 1L, 0L, 0L))
+      expect_identical(cdata$col, cdata$array_col)
+      expect_identical(cdata$row, cdata$array_row)
+      expect_identical(cdata$pxl_col_in_fullres, unname(srt$custom_x))
+      expect_identical(cdata$pxl_row_in_fullres, unname(srt$custom_y))
+      mock_bayesspace_complete(sce)
+    }
+    out <- with_mock_bayesspace(cluster_fun, {
+      RunBayesSpace(
+        srt,
+        q = 2,
+        coord.cols = c("custom_x", "custom_y"),
+        preprocess = FALSE,
+        verbose = FALSE
+      )
+    })
+    expect_identical(backend_calls, 1L)
+    result <- out@tools[["BayesSpace"]]
+    expect_identical(result$parameters$coord.cols, c("custom_x", "custom_y"))
+    expect_identical(result$coords$x, unname(srt$custom_x))
+    expect_identical(result$coords$y, unname(srt$custom_y))
+  }
+})
+
+test_that("BayesSpace selected native metadata retains array indices and spot order", {
+  skip_if_not_installed("SingleCellExperiment")
+  for (coord_cols in list(c("col", "row"), c("array_col", "array_row"), c("ArrayCol", "ArrayRow"))) {
+    srt <- make_bayesspace_object()
+    srt$col <- NULL
+    srt$row <- NULL
+    array_coords <- data.frame(
+      col = c(4L, 6L, 5L, 7L),
+      row = c(10L, 10L, 11L, 11L),
+      row.names = colnames(srt)
+    )
+    colnames(array_coords) <- coord_cols
+    srt <- SeuratObject::AddMetaData(srt, metadata = array_coords)
+    sce <- Seurat::as.SingleCellExperiment(srt)
+    sce <- sce[, rev(seq_len(ncol(sce)))]
+    input <- bayesspace_add_spatial_coords(srt, sce, coord.cols = coord_cols)
+    cdata <- as.data.frame(SummarizedExperiment::colData(input$sce))
+    expect_identical(rownames(cdata), colnames(sce))
+    expect_equal(cdata$array_col, rev(array_coords[[1L]]))
+    expect_equal(cdata$array_row, rev(array_coords[[2L]]))
+    expect_identical(input$source$coord.cols, coord_cols)
+    expect_identical(input$coords$cell_id, colnames(srt))
+  }
+})
+
+test_that("BayesSpace falls back to native array metadata when defaults are absent", {
+  skip_if_not_installed("SingleCellExperiment")
+  srt <- make_bayesspace_object()
+  srt$array_col <- srt$col + 4
+  srt$array_row <- srt$row + 10
+  srt$col <- NULL
+  srt$row <- NULL
+  input <- bayesspace_add_spatial_coords(srt, Seurat::as.SingleCellExperiment(srt))
+  cdata <- as.data.frame(SummarizedExperiment::colData(input$sce))
+  expect_equal(cdata$array_col, unname(srt$array_col))
+  expect_equal(cdata$array_row, unname(srt$array_row))
+  expect_identical(input$source$coord.cols, c("array_col", "array_row"))
+})
+
+test_that("RunBayesSpace default metadata selection preserves native indices", {
+  skip_if_not_installed("SingleCellExperiment")
+  for (include_array_coords in c(FALSE, TRUE)) {
+    srt <- make_bayesspace_object()
+    srt$col <- c(20, 22, 21, 23)
+    srt$row <- c(10, 10, 11, 11)
+    if (include_array_coords) {
+      srt$array_col <- c(40L, 42L, 41L, 43L)
+      srt$array_row <- c(30L, 30L, 31L, 31L)
+    }
+    srt$x <- c(400, 200, 300, 100)
+    srt$y <- c(900, 900, 800, 800)
+    expected_col <- if (include_array_coords) unname(srt$array_col) else unname(srt$col)
+    expected_row <- if (include_array_coords) unname(srt$array_row) else unname(srt$row)
+    cluster_fun <- function(sce, ...) {
+      cdata <- as.data.frame(SummarizedExperiment::colData(sce))
+      expect_identical(cdata$array_col, expected_col)
+      expect_identical(cdata$array_row, expected_row)
+      expect_identical(cdata$col, cdata$array_col)
+      expect_identical(cdata$row, cdata$array_row)
+      expect_identical(cdata$pxl_col_in_fullres, unname(srt$x))
+      expect_identical(cdata$pxl_row_in_fullres, unname(srt$y))
+      mock_bayesspace_complete(sce)
+    }
+    out <- with_mock_bayesspace(cluster_fun, {
+      RunBayesSpace(srt, q = 2, preprocess = FALSE, verbose = FALSE)
+    })
+    result <- out@tools[["BayesSpace"]]
+    expect_identical(result$parameters$coord.cols, c("x", "y"))
+    expect_identical(result$coords$x, unname(srt$x))
+    expect_identical(result$coords$y, unname(srt$y))
+  }
+})
+
+test_that("RunBayesSpace emits an exact receipt and safely quotes its Plot hint", {
+  skip_if_not_installed("SingleCellExperiment")
+  srt <- make_bayesspace_object()
+  cluster_colname <- 'Bayes "quoted"\\domain'
+  coord_cols <- c('x "quoted"', "y\\path")
+  custom_coords <- data.frame(
+    x = c(10, 20, 10, 20),
+    y = c(30, 30, 40, 40),
+    row.names = colnames(srt),
+    check.names = FALSE
+  )
+  colnames(custom_coords) <- coord_cols
+  srt <- SeuratObject::AddMetaData(srt, metadata = custom_coords)
+  out <- NULL
+  messages <- suppressWarnings(testthat::capture_messages(
+    out <- with_mock_bayesspace(mock_bayesspace_complete, {
+      RunBayesSpace(
+        srt,
+        q = 2,
+        preprocess = FALSE,
+        cluster_colname = cluster_colname,
+        coord.cols = coord_cols,
+        store_sce = FALSE,
+        verbose = TRUE
+      )
+    })
+  ))
+  plain <- bayesspace_receipt_plain(messages)
+  expect_true(grepl(
+    "BayesSpace completed: 4 spots, 2 domains, domain size 2-2",
+    plain,
+    fixed = TRUE
+  ))
+  expect_true(grepl("Scope assay", plain, fixed = TRUE))
+  expect_true(grepl("raw coordinates", plain, fixed = TRUE))
+  expect_true(grepl("Saved metadata column", plain, fixed = TRUE))
+  expect_true(grepl(cluster_colname, plain, fixed = TRUE))
+  expect_true(grepl("returned object tool bundle `BayesSpace`", plain, fixed = TRUE))
+  expect_true(cluster_colname %in% colnames(out[[]]))
+  plot_call <- paste0(
+    "SpatialSpotPlot(<returned_object>, group.by = ",
+    deparse1(cluster_colname, width.cutoff = 500L),
+    ", coord.cols = ",
+    deparse1(coord_cols, width.cutoff = 500L),
+    ")"
+  )
+  bayesspace_expect_receipt_plot_hint(messages, plot_call)
+  expect_identical(
+    out@tools[["BayesSpace"]]$parameters$coord.cols,
+    coord_cols
+  )
+  executable_call <- sub("<returned_object>", "out", plot_call, fixed = TRUE)
+  expect_no_error(eval(parse(text = executable_call)))
+  expect_false(grepl("srt", plain, fixed = TRUE))
+})
+
+test_that("RunBayesSpace receipt uses a valid image scale or metadata inspection", {
+  skip_if_not_installed("SingleCellExperiment")
+  fixture <- make_bayesspace_visium_v1_object()
+  fixture$object[["slice"]]@scale.factors$lowres <- NA_real_
+
+  hires_messages <- testthat::capture_messages(
+    hires_out <- with_mock_bayesspace(mock_bayesspace_complete, {
+      RunBayesSpace(
+        fixture$object,
+        q = 2,
+        image = "slice",
+        preprocess = FALSE,
+        store_sce = FALSE,
+        verbose = TRUE
+      )
+    })
+  )
+  hires_call <- paste0(
+    "SpatialSpotPlot(<returned_object>, group.by = \"BayesSpace_cluster\", ",
+    "image = \"slice\", image.scale = \"hires\")"
+  )
+  bayesspace_expect_receipt_plot_hint(hires_messages, hires_call)
+  hires_plot <- NULL
+  expect_no_error(
+    hires_plot <- eval(parse(text = sub(
+      "<returned_object>",
+      "hires_out",
+      hires_call,
+      fixed = TRUE
+    )))
+  )
+  expect_s3_class(hires_plot, "ggplot")
+
+  no_scale <- make_bayesspace_visium_v1_object()$object
+  no_scale[["slice"]]@scale.factors$lowres <- NA_real_
+  no_scale[["slice"]]@scale.factors$hires <- NA_real_
+  inspect_messages <- testthat::capture_messages(
+    inspect_out <- with_mock_bayesspace(mock_bayesspace_complete, {
+      RunBayesSpace(
+        no_scale,
+        q = 2,
+        image = "slice",
+        preprocess = FALSE,
+        store_sce = FALSE,
+        verbose = TRUE
+      )
+    })
+  )
+  inspect_plain <- bayesspace_receipt_plain(inspect_messages)
+  inspect_call <- paste0(
+    "<returned_object>[[]][, \"BayesSpace_cluster\", drop = FALSE]"
+  )
+  expect_true(grepl(
+    paste0("Inspect returned object `", inspect_call, "`"),
+    inspect_plain,
+    fixed = TRUE
+  ))
+  expect_false(grepl("Plot returned object", inspect_plain, fixed = TRUE))
+  inspected <- NULL
+  expect_no_error(
+    inspected <- eval(parse(text = sub(
+      "<returned_object>",
+      "inspect_out",
+      inspect_call,
+      fixed = TRUE
+    )))
+  )
+  expect_identical(colnames(inspected), "BayesSpace_cluster")
+  expect_identical(rownames(inspected), colnames(inspect_out))
+})
+
+test_that("RunBayesSpace is silent on request and failure has no receipt", {
+  skip_if_not_installed("SingleCellExperiment")
+  srt <- make_bayesspace_object()
+  quiet <- NULL
+  quiet_messages <- suppressWarnings(testthat::capture_messages(
+    quiet <- with_mock_bayesspace(mock_bayesspace_complete, {
+      RunBayesSpace(
+        srt,
+        q = 2,
+        preprocess = FALSE,
+        store_sce = FALSE,
+        verbose = FALSE
+      )
+    })
+  ))
+  expect_length(quiet_messages, 0L)
+  expect_s4_class(quiet, "Seurat")
+
+  missing_cluster <- function(sce, ...) sce
+  failure_messages <- suppressWarnings(testthat::capture_messages(
+    with_mock_bayesspace(missing_cluster, {
+      expect_error(
+        RunBayesSpace(
+          srt,
+          q = 2,
+          preprocess = FALSE,
+          store_sce = FALSE,
+          verbose = TRUE
+        ),
+        "did not return"
+      )
+    })
+  ))
+  expect_false(grepl(
+    "BayesSpace completed",
+    bayesspace_receipt_plain(failure_messages),
+    fixed = TRUE
+  ))
+})
+
+test_that("BayesSpace preserves exact Visium array indices separately from raw pixels", {
+  skip_if_not_installed("SingleCellExperiment")
+  fixture <- make_bayesspace_visium_v1_object()
+  sce <- Seurat::as.SingleCellExperiment(fixture$object)
+  input <- bayesspace_add_spatial_coords(
+    srt = fixture$object,
+    sce = sce,
+    image = "slice",
+    platform = "Visium"
+  )
+  cdata <- as.data.frame(SummarizedExperiment::colData(input$sce))
+  expect_identical(cdata$array_row, fixture$coordinates$row)
+  expect_identical(cdata$array_col, fixture$coordinates$col)
+  expect_equal(input$coords$x, fixture$coordinates$imagecol)
+  expect_equal(input$coords$y, fixture$coordinates$imagerow)
+  expect_identical(input$source$backend_coordinate_space, "array_index")
+})
+
+test_that("BayesSpace image selection preserves native array metadata", {
+  skip_if_not_installed("SingleCellExperiment")
+  fixture <- make_bayesspace_visium_v1_object()
+  srt <- fixture$object
+  srt$array_col <- fixture$coordinates$col
+  srt$array_row <- fixture$coordinates$row
+  srt$custom_x <- c(100, 300, 200, 400)
+  srt$custom_y <- c(800, 800, 900, 900)
+  input <- bayesspace_add_spatial_coords(
+    srt,
+    Seurat::as.SingleCellExperiment(srt),
+    image = "slice",
+    coord.cols = c("custom_x", "custom_y")
+  )
+  cdata <- as.data.frame(SummarizedExperiment::colData(input$sce))
+  expect_identical(cdata$array_col, fixture$coordinates$col)
+  expect_identical(cdata$array_row, fixture$coordinates$row)
+  expect_equal(input$coords$x, fixture$coordinates$imagecol)
+  expect_equal(input$coords$y, fixture$coordinates$imagerow)
+  expect_identical(input$source$image, "slice")
+})
+
+test_that("RunBayesSpace rejects ambiguous or partial image selection atomically", {
+  skip_if_not_installed("SpatialExperiment")
+  srt <- make_bayesspace_multi_image_object()
+  metadata_before <- srt[[]]
+  tools_before <- srt@tools
+
+  with_mock_bayesspace(mock_bayesspace_complete, {
+    expect_error(
+      RunBayesSpace(
+        srt,
+        q = 2,
+        preprocess = FALSE,
+        store_sce = FALSE,
+        verbose = FALSE
+      ),
+      "Multiple spatial images"
+    )
+    expect_error(
+      RunBayesSpace(
+        srt,
+        q = 2,
+        image = "slice1",
+        preprocess = FALSE,
+        store_sce = FALSE,
+        verbose = FALSE
+      ),
+      "exactly one row for every object\\s+spot"
+    )
+  })
+
+  expect_identical(srt[[]], metadata_before)
+  expect_identical(srt@tools, tools_before)
+})
+
+test_that("RunBayesSpace validates backend spot alignment before mutation", {
+  skip_if_not_installed("SpatialExperiment")
+  srt <- make_bayesspace_object()
+  metadata_before <- srt[[]]
+  tools_before <- srt@tools
+  incomplete_backend <- function(sce, ...) {
+    sce <- sce[, -1, drop = FALSE]
+    mock_bayesspace_complete(sce)
+  }
+
+  with_mock_bayesspace(incomplete_backend, {
+    expect_error(
+      RunBayesSpace(
+        srt,
+        q = 2,
+        preprocess = FALSE,
+        store_sce = FALSE,
+        verbose = FALSE
+      ),
+      "exactly one row for every input spot"
+    )
+  })
+
+  expect_identical(srt[[]], metadata_before)
+  expect_identical(srt@tools, tools_before)
+})
+
+test_that("RunBayesSpace realigns reordered backend output by spot ID", {
+  skip_if_not_installed("SingleCellExperiment")
+  srt <- make_bayesspace_object()
+  reordered_backend <- function(sce, ...) {
+    cdata <- as.data.frame(SummarizedExperiment::colData(sce))
+    cdata$spatial.cluster <- paste0("domain_", rownames(cdata))
+    SummarizedExperiment::colData(sce) <- S4Vectors::DataFrame(cdata)
+    sce[, rev(seq_len(ncol(sce))), drop = FALSE]
+  }
+
+  with_mock_bayesspace(reordered_backend, {
+    out <- RunBayesSpace(
+      srt,
+      q = 2,
+      preprocess = FALSE,
+      store_sce = FALSE,
+      verbose = FALSE
+    )
+  })
+
+  expect_identical(
+    as.character(out$BayesSpace_cluster),
+    paste0("domain_", colnames(out))
+  )
+  expect_identical(
+    rownames(out@tools[["BayesSpace"]]$colData),
+    colnames(out)
+  )
+})
+
+test_that("RunBayesSpace rejects missing cluster labels before mutation", {
+  skip_if_not_installed("SpatialExperiment")
+  srt <- make_bayesspace_object()
+  metadata_before <- srt[[]]
+  empty_label_backend <- function(sce, ...) {
+    cdata <- as.data.frame(SummarizedExperiment::colData(sce))
+    cdata$spatial.cluster <- c("domain_1", NA, "domain_2", "")
+    SummarizedExperiment::colData(sce) <- S4Vectors::DataFrame(cdata)
+    sce
+  }
+
+  with_mock_bayesspace(empty_label_backend, {
+    expect_error(
+      RunBayesSpace(
+        srt,
+        q = 2,
+        preprocess = FALSE,
+        store_sce = FALSE,
+        verbose = FALSE
+      ),
+      "missing or empty"
+    )
+  })
+  expect_identical(srt[[]], metadata_before)
+})
+
+test_that("BayesSpace metadata views retain subset and rename compatibility", {
+  skip_if_not_installed("SingleCellExperiment")
+  with_mock_bayesspace(mock_bayesspace_complete, {
+    out <- suppressWarnings(RunBayesSpace(make_bayesspace_object(), q = 2, preprocess = FALSE,
+      store_sce = FALSE, cluster_colname = "cell", verbose = FALSE))
+  })
+  expect_spatial_result_lifecycle(out, "BayesSpace", "cell")
+})

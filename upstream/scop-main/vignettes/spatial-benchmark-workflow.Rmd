@@ -1,0 +1,124 @@
+---
+title: "Spatial domain benchmark workflow"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  eval = TRUE,
+  fig.align = "center",
+  dpi = 144,
+  out.width = "92%"
+)
+```
+
+This article compares spatial domain clustering methods with
+[RunSpatialBenchmark()]. Each method runs in an isolated R process; results
+include ARI, NMI, purity, runtime, and peak memory against a gold-standard
+label column. Visualize the result with [SpatialBenchmarkPlot()].
+
+Supported producers include `BayesSpace`, `BANKSY`, and `SmoothClust`. This
+workflow is separate from scRNA batch integration benchmarking
+([RunIntegrationBenchmark()]).
+
+## Load data and define a gold standard
+
+This workflow uses a small simulated spatial object with three regions and
+region-specific expression signals. It demonstrates the benchmark interface;
+replace the simulated labels with tissue annotations for real analyses.
+
+```{r load-data}
+library(scop)
+
+set.seed(42)
+n_spots <- 36L
+n_genes <- 60L
+grid <- expand.grid(x = 1:6, y = 1:6)
+spatial_domain <- factor(ifelse(grid$x <= 2, "left", ifelse(grid$x <= 4, "middle", "right")))
+counts <- matrix(rpois(n_genes * n_spots, 2),
+  nrow = n_genes,
+  dimnames = list(paste0("Gene", seq_len(n_genes)), paste0("spot", seq_len(n_spots)))
+)
+signal <- split(seq_len(n_genes), rep(c("left", "middle", "right"), each = 20))
+for (label in names(signal)) {
+  counts[signal[[label]], spatial_domain == label] <-
+    counts[signal[[label]], spatial_domain == label] + rpois(sum(spatial_domain == label) * 20, 5)
+}
+spatial <- SeuratObject::CreateSeuratObject(counts)
+spatial$x <- grid$x
+spatial$y <- grid$y
+spatial$gold_domain <- spatial_domain
+table(spatial$gold_domain)
+```
+
+## Run the benchmark
+
+Methods share the same spot set. Tune per-method arguments through
+`method_params` when backends need different PCA counts or layers.
+
+```{r run-benchmark}
+bench <- RunSpatialBenchmark(
+  spatial,
+  gold_standard = "gold_domain",
+  method_params = list(
+    BayesSpace = list(n.PCs = 5, n.HVGs = 20, coord.cols = c("x", "y")),
+    BANKSY = list(layer = "counts", coord.cols = c("x", "y")),
+    SmoothClust = list(layer = "counts", min_spots = 1, coord.cols = c("x", "y"))
+  ),
+  verbose = FALSE
+)
+
+bench$summary
+```
+
+## Inspect the result object
+
+`RunSpatialBenchmark()` returns a `spatial_benchmark_result` list:
+
+- `$summary`: quality and resource metrics per method;
+- `$predictions`: aligned domain labels per spot;
+- `$metrics`: long metric table for custom plots.
+
+```{r inspect-result}
+str(bench$summary, max.level = 1)
+head(bench$predictions)
+```
+
+## Plot benchmark views
+
+For a `spatial_benchmark_result`, `plot_type = "auto"` selects the
+publication-oriented overview that combines clustering agreement with runtime
+and peak-memory efficiency. For an ordinary summary table, `auto` selects the
+stable native bar view; it does not depend on whether the optional
+`funkyheatmap` package happens to be installed.
+
+```{r plot-overview, fig.height=6}
+SpatialBenchmarkPlot(data = bench, plot_type = "overview")
+```
+
+Other views:
+
+```r
+SpatialBenchmarkPlot(data = bench, plot_type = "quality")
+SpatialBenchmarkPlot(data = bench, plot_type = "efficiency")
+SpatialBenchmarkPlot(data = bench, plot_type = "heatmap")
+SpatialBenchmarkPlot(data = bench, plot_type = "funkyheatmap")
+```
+
+`funkyheatmap` is an explicit optional view. If its dependency is unavailable,
+the call reports that availability condition; it is never selected implicitly
+by `auto`.
+
+## What to report
+
+A spatial benchmark report should include:
+
+- the gold-standard column and number of domains;
+- methods compared and any `method_params` overrides;
+- `$summary` with ARI, NMI, purity, runtime, and peak memory;
+- the overview or quality plot;
+- failed or unavailable methods (status column) when backends are missing.
+
+Agreement metrics are higher when better; runtime and peak memory are lower
+when better.

@@ -1,0 +1,800 @@
+#' @title Run KNN prediction
+#'
+#' @description
+#' Performs KNN prediction to annotate cell types based on reference scRNA-seq or bulk RNA-seq data.
+#'
+#' @md
+#' @inheritParams thisutils::log_message
+#' @param srt_query An object of class Seurat to be annotated with cell types.
+#' @param srt_ref An object of class Seurat storing the reference cells.
+#' @param bulk_ref A cell atlas matrix, where cell types are represented by columns and genes are represented by rows.
+#' Either `srt_ref` or `bulk_ref` must be provided.
+#' @param query_group Column name in the `srt_query` metadata that represents the cell grouping.
+#' @param ref_group Column name in the `srt_ref` metadata that represents the cell grouping.
+#' @param query_assay Assay to be used for the query data.
+#' Default is the default assay of the `srt_query` object.
+#' @param ref_assay Assay to be used for the reference data.
+#' Default is the default assay of the `srt_ref` object.
+#' @param query_reduction Dimensionality reduction method used for the query data.
+#' If NULL, the function will use the default reduction method specified in the `srt_query` object.
+#' @param ref_reduction Dimensionality reduction method used for the reference data.
+#' If NULL, the function will use the default reduction method specified in the `srt_ref` object.
+#' @param query_dims Dimensions to be used for the query data.
+#' Default is the first `30` dimensions.
+#' @param ref_dims Dimensions to be used for the reference data.
+#' Default is the first `30` dimensions.
+#' @param query_collapsing A boolean value indicating whether the query data should be collapsed to group-level average expression values.
+#' If TRUE, the function will calculate the average expression values for each group in the query data and the annotation will be performed separately for each group. Otherwise it will use the raw expression values for each cell.
+#' @param ref_collapsing A boolean value indicating whether the reference data should be collapsed to group-level average expression values.
+#' If TRUE, the function will calculate the average expression values for each group in the reference data and the annotation will be performed separately for each group.
+#' Otherwise it will use the raw expression values for each cell.
+#' @param return_full_distance_matrix A boolean value indicating whether the full distance matrix should be returned.
+#' If TRUE, the function will return the distance matrix used for the KNN prediction, otherwise it will only return the annotated cell types.
+#' @param features Features to be used for the KNN prediction.
+#' If `NULL`, all the features in the query and reference data will be used.
+#' @param features_type Type of features to be used for the KNN prediction.
+#' Must be one of "HVF" (highly variable features) or "DE" (differentially expressed features).
+#' @param feature_source The source of the features to be used.
+#' Must be one of "both", "query", or "ref".
+#' @param nfeatures Maximum number of features to be used for the KNN prediction.
+#' @param DEtest_param A list of parameters to be passed to the differential expression test function if `features_type` is set to "DE". Default is `list(max.cells.per.ident = 200, test.use = "wilcox")`.
+#' @param DE_threshold Threshold used to filter the DE features.
+#' If using "roc" test, `DE_threshold` should be needs to be reassigned. e.g. "power > 0.5".
+#' @param nn_method Nearest neighbor search method to use.
+#' Options are "raw", "annoy", and "rann".
+#' If "raw" is selected, the function will use the brute-force method to find the nearest neighbors.
+#' If "annoy" is selected, the function will use the Annoy library for approximate nearest neighbor search.
+#' If "rann" is selected, the function will use the RANN library for approximate nearest neighbor search.
+#' If not provided, the function will choose the search method based on the size of the query and reference datasets.
+#' For finite dense inputs using cosine or Euclidean distance, the raw path
+#' uses a bounded-memory compiled top-k kernel unless the full distance
+#' matrix is requested. Other metrics and sparse inputs retain the existing
+#' proxyC path.
+#' @param distance_metric Distance metric to be used for calculating similarity between cells.
+#' Must be one of "cosine", "euclidean", "manhattan", or "hamming".
+#' @param k A number of nearest neighbors to be considered for the KNN prediction.
+#' @param filter_lowfreq Threshold for filtering low-frequency cell types from the predicted results.
+#' Cell types with a frequency lower than `filter_lowfreq` will be labelled as "unreliable".
+#' Default is `0`, which means no filtering will be performed.
+#' @param prefix Prefix to be added to the resulting annotations.
+#'
+#' @seealso
+#' [RunKNNMap], [RunSingleR], [CellCorHeatmap]
+#'
+#' @export
+#'
+#' @examples
+#' data(panc8_sub)
+#' keep <- panc8_sub$celltype %in% c("ductal", "alpha", "beta")
+#' reference <- Seurat::NormalizeData(
+#'   panc8_sub[, keep & panc8_sub$tech != "fluidigmc1"],
+#'   verbose = FALSE
+#' )
+#' query <- Seurat::NormalizeData(
+#'   panc8_sub[, keep & panc8_sub$tech == "fluidigmc1"],
+#'   verbose = FALSE
+#' )
+#' genes <- head(intersect(rownames(reference), rownames(query)), 200)
+#' query <- RunKNNPredict(
+#'   query,
+#'   srt_ref = reference, ref_group = "celltype",
+#'   features = genes, nfeatures = length(genes),
+#'   ref_collapsing = FALSE, k = 10, verbose = FALSE
+#' )
+#' query <- RunStandardWorkflow(query, verbose = FALSE, linear_reduction_dims = 10)
+#' CellDimPlot(
+#'   query,
+#'   group.by = "KNNPredict_classification",
+#'   label = TRUE, legend.position = "bottom"
+#' )
+#' FeatureStatPlot(
+#'   query,
+#'   stat.by = "KNNPredict_prob",
+#'   group.by = "KNNPredict_classification",
+#'   plot_type = "box"
+#' )
+RunKNNPredict <- function(
+  srt_query,
+  srt_ref = NULL,
+  bulk_ref = NULL,
+  query_group = NULL,
+  ref_group = NULL,
+  query_assay = NULL,
+  ref_assay = NULL,
+  query_reduction = NULL,
+  ref_reduction = NULL,
+  query_dims = 1:30,
+  ref_dims = 1:30,
+  query_collapsing = !is.null(query_group),
+  ref_collapsing = TRUE,
+  return_full_distance_matrix = FALSE,
+  features = NULL,
+  features_type = c("HVF", "DE"),
+  feature_source = "both",
+  nfeatures = 2000,
+  DEtest_param = list(
+    max.cells.per.ident = 200,
+    test.use = "wilcox"
+  ),
+  DE_threshold = "p_val_adj < 0.05",
+  nn_method = NULL,
+  distance_metric = "cosine",
+  k = 30,
+  filter_lowfreq = 0,
+  prefix = "KNNPredict",
+  verbose = TRUE
+) {
+  query_assay <- query_assay %||% SeuratObject::DefaultAssay(srt_query)
+  features_type <- match.arg(features_type)
+  if (is.null(query_reduction) + is.null(ref_reduction) == 1) {
+    log_message(
+      "query_reduction and ref_reduction must be both provided",
+      message_type = "error"
+    )
+  }
+  if (is.null(query_reduction) + is.null(ref_reduction) == 2) {
+    use_reduction <- FALSE
+  } else {
+    use_reduction <- TRUE
+  }
+  if (isFALSE(use_reduction)) {
+    if (length(features) == 0) {
+      if (features_type == "HVF" && feature_source %in% c("both", "query")) {
+        if (length(SeuratObject::VariableFeatures(srt_query, assay = query_assay)) == 0) {
+          log_message("Perform {.fn Seurat::FindVariableFeatures} on the query data...", verbose = verbose)
+          srt_query <- FindVariableFeatures(
+            srt_query,
+            nfeatures = nfeatures,
+            assay = query_assay,
+            verbose = FALSE
+          )
+        }
+        features_query <- SeuratObject::VariableFeatures(srt_query, assay = query_assay)
+      } else if (features_type == "DE" && feature_source %in% c("both", "query")) {
+        if (is.null(query_group)) {
+          log_message(
+            "'query_group' must be provided when 'features_type' is 'DE' and 'feature_source' is 'both' or 'query'",
+            message_type = "error"
+          )
+        } else {
+          layer <- paste0("DEtest_", query_group)
+          DEtest_param[["force"]] <- TRUE
+          if (
+            !layer %in% names(srt_query@tools) ||
+              length(grep(
+                pattern = "AllMarkers",
+                names(srt_query@tools[[layer]])
+              )) ==
+                0
+          ) {
+            srt_query <- do.call(
+              RunDEtest,
+              c(
+                list(object = srt_query, group.by = query_group),
+                DEtest_param
+              )
+            )
+          }
+          if ("test.use" %in% names(DEtest_param)) {
+            test.use <- DEtest_param[["test.use"]]
+          } else {
+            test.use <- "wilcox"
+          }
+          index <- grep(
+            pattern = paste0("AllMarkers_", test.use),
+            names(srt_query@tools[[layer]])
+          )[1]
+          de <- names(srt_query@tools[[layer]])[index]
+          log_message(
+            "Use the DE features from ",
+            de,
+            " to calculate distance metric.",
+            verbose = verbose
+          )
+          de_df <- srt_query@tools[[layer]][[de]]
+          de_df <- de_df[
+            with(de_df, eval(rlang::parse_expr(DE_threshold))), ,
+            drop = FALSE
+          ]
+          rownames(de_df) <- seq_len(nrow(de_df))
+          de_df <- de_df[
+            order(de_df[["avg_log2FC"]], decreasing = TRUE), ,
+            drop = FALSE
+          ]
+          de_top <- de_df[!duplicated(de_df[["gene"]]), , drop = FALSE]
+          stat <- sort(table(de_top$group1))
+          stat <- stat[stat > 0]
+          mat <- matrix(FALSE, nrow = max(stat), ncol = length(stat))
+          colnames(mat) <- names(stat)
+          for (g in names(stat)) {
+            mat[1:stat[g], g] <- TRUE
+          }
+          nfeatures <- sum(cumsum(Matrix::rowSums(mat)) <= nfeatures)
+          if (test.use == "roc") {
+            features_query <- unlist(by(
+              de_top,
+              list(de_top[["group1"]]),
+              function(x) {
+                x <- x[order(x[["power"]], decreasing = TRUE), , drop = FALSE]
+                utils::head(x[["gene"]], nfeatures)
+              }
+            ))
+          } else {
+            features_query <- unlist(by(
+              de_top,
+              list(de_top[["group1"]]),
+              function(x) {
+                x <- x[order(x[["p_val"]], decreasing = FALSE), , drop = FALSE]
+                utils::head(x[["gene"]], nfeatures)
+              }
+            ))
+          }
+          log_message(
+            "DE features number of the query data: ",
+            length(features_query),
+            verbose = verbose
+          )
+        }
+      } else {
+        features_query <- rownames(srt_query[[query_assay]])
+      }
+    }
+  }
+
+  if (!is.null(bulk_ref)) {
+    if (length(features) == 0) {
+      features <- features_query
+    }
+    features_common <- intersect(features, rownames(bulk_ref))
+    log_message("Use ", length(features_common), " features to calculate distance.", verbose = verbose)
+    ref <- Matrix::t(bulk_ref[features_common, , drop = FALSE])
+  } else if (!is.null(srt_ref)) {
+    ref_assay <- ref_assay %||% SeuratObject::DefaultAssay(srt_ref)
+    if (!is.null(ref_group)) {
+      if (length(ref_group) == ncol(srt_ref)) {
+        srt_ref[["ref_group"]] <- ref_group
+      } else if (length(ref_group) == 1) {
+        if (!ref_group %in% colnames(srt_ref@meta.data)) {
+          log_message(
+            "ref_group must be one of the column names in the meta.data",
+            message_type = "error"
+          )
+        } else {
+          srt_ref[["ref_group"]] <- srt_ref[[ref_group]]
+        }
+      } else {
+        log_message(
+          "Length of ref_group must be one or length of srt_ref.",
+          message_type = "error"
+        )
+      }
+    } else {
+      log_message(
+        "ref_group must be provided.",
+        message_type = "error"
+      )
+    }
+
+    drop_cell <- colnames(srt_ref)[is.na(srt_ref[["ref_group", drop = TRUE]])]
+    if (length(drop_cell) > 0) {
+      log_message("Drop ", length(drop_cell), " cells with NA in the ref_group", verbose = verbose)
+      srt_ref <- srt_ref[, setdiff(colnames(srt_ref), drop_cell)]
+    }
+    if (isTRUE(use_reduction)) {
+      log_message("Use the reduction to calculate distance metric.", verbose = verbose)
+      if (
+        !is.null(query_dims) &&
+          !is.null(ref_dims) &&
+          length(query_dims) == length(ref_dims)
+      ) {
+        query <- Embeddings(srt_query, reduction = query_reduction)[
+          ,
+          query_dims
+        ]
+        ref <- Embeddings(srt_ref, reduction = ref_reduction)[, ref_dims]
+      } else {
+        log_message(
+          "query_dims and ref_dims must be provided with the same length.",
+          message_type = "error"
+        )
+      }
+    } else {
+      if (length(features) == 0) {
+        if (features_type == "HVF" && feature_source %in% c("both", "ref")) {
+          log_message("Use the HVF to calculate distance metric", verbose = verbose)
+          if (length(SeuratObject::VariableFeatures(srt_ref, assay = ref_assay)) == 0) {
+            srt_ref <- FindVariableFeatures(
+              srt_ref,
+              nfeatures = nfeatures,
+              assay = ref_assay
+            )
+          }
+          features_ref <- SeuratObject::VariableFeatures(srt_ref, assay = ref_assay)
+        } else if (
+          features_type == "DE" && feature_source %in% c("both", "ref")
+        ) {
+          layer <- paste0("DEtest_", ref_group)
+          DEtest_param[["force"]] <- TRUE
+          if (
+            !layer %in% names(srt_ref@tools) ||
+              length(grep(
+                pattern = "AllMarkers",
+                names(srt_ref@tools[[layer]])
+              )) ==
+                0
+          ) {
+            srt_ref <- do.call(
+              RunDEtest,
+              c(list(object = srt_ref, group.by = ref_group), DEtest_param)
+            )
+          }
+          if ("test.use" %in% names(DEtest_param)) {
+            test.use <- DEtest_param[["test.use"]]
+          } else {
+            test.use <- "wilcox"
+          }
+          index <- grep(
+            pattern = paste0("AllMarkers_", test.use),
+            names(srt_ref@tools[[layer]])
+          )[1]
+          de <- names(srt_ref@tools[[layer]])[index]
+          log_message(
+            "Use the DE features from ",
+            de,
+            " to calculate distance metric.",
+            verbose = verbose
+          )
+          de_df <- srt_ref@tools[[layer]][[de]]
+          de_df <- de_df[
+            with(de_df, eval(rlang::parse_expr(DE_threshold))), ,
+            drop = FALSE
+          ]
+          rownames(de_df) <- seq_len(nrow(de_df))
+          de_df <- de_df[
+            order(de_df[["avg_log2FC"]], decreasing = TRUE), ,
+            drop = FALSE
+          ]
+          de_top <- de_df[!duplicated(de_df[["gene"]]), , drop = FALSE]
+          stat <- sort(table(de_top$group1))
+          stat <- stat[stat > 0]
+          mat <- matrix(FALSE, nrow = max(stat), ncol = length(stat))
+          colnames(mat) <- names(stat)
+          for (g in names(stat)) {
+            mat[1:stat[g], g] <- TRUE
+          }
+          nfeatures <- sum(cumsum(Matrix::rowSums(mat)) <= nfeatures)
+          if (test.use == "roc") {
+            features_ref <- unlist(by(
+              de_top,
+              list(de_top[["group1"]]),
+              function(x) {
+                x <- x[order(x[["power"]], decreasing = TRUE), , drop = FALSE]
+                utils::head(x[["gene"]], nfeatures)
+              }
+            ))
+          } else {
+            features_ref <- unlist(by(
+              de_top,
+              list(de_top[["group1"]]),
+              function(x) {
+                x <- x[order(x[["p_val"]], decreasing = FALSE), , drop = FALSE]
+                utils::head(x[["gene"]], nfeatures)
+              }
+            ))
+          }
+          log_message("DE features number of the ref data: ", length(features_ref), verbose = verbose)
+        } else {
+          features_ref <- rownames(srt_ref[[ref_assay]])
+        }
+        features <- intersect(features_ref, features_query)
+      }
+      features_common <- Reduce(
+        intersect,
+        list(
+          features,
+          rownames(srt_query[[query_assay]]),
+          rownames(srt_ref[[ref_assay]])
+        )
+      )
+      log_message(
+        "Use ",
+        length(features_common),
+        " features to calculate distance.",
+        verbose = verbose
+      )
+      if (isTRUE(ref_collapsing)) {
+        ref <- Seurat::AverageExpression(
+          object = srt_ref,
+          features = features_common,
+          layer = "data",
+          assays = ref_assay,
+          group.by = "ref_group",
+          verbose = FALSE
+        )[[1]]
+        ref <- Matrix::t(log1p(ref))
+        ref_group_names <- levels(droplevels(as.factor(
+          srt_ref[["ref_group", drop = TRUE]]
+        )))
+        if (length(ref_group_names) == nrow(ref)) {
+          rownames(ref) <- ref_group_names
+        }
+      } else {
+        ref <- Matrix::t(
+          GetAssayData5(
+            srt_ref,
+            layer = "data",
+            assay = ref_assay
+          )[features_common, ]
+        )
+      }
+    }
+  } else {
+    log_message(
+      "srt_ref or bulk_ref must be provided at least one",
+      message_type = "error"
+    )
+  }
+
+  if (!inherits(ref, "matrix")) {
+    ref <- as_matrix(ref)
+  }
+  k <- min(c(k, nrow(ref)))
+
+  if (!is.null(query_group)) {
+    if (length(query_group) == ncol(srt_query)) {
+      srt_query[["query_group"]] <- query_group
+    } else if (length(query_group) == 1) {
+      if (!query_group %in% colnames(srt_query@meta.data)) {
+        log_message(
+          "query_group must be one of the column names in the meta.data",
+          message_type = "error"
+        )
+      } else {
+        srt_query[["query_group"]] <- srt_query[[query_group]]
+      }
+    } else {
+      log_message(
+        "Length of query_group must be one or length of srt_query.",
+        message_type = "error"
+      )
+    }
+  }
+  if (isFALSE(use_reduction)) {
+    query_assay <- query_assay %||% SeuratObject::DefaultAssay(srt_query)
+    if (isTRUE(query_collapsing)) {
+      if (is.null(query_group)) {
+        log_message(
+          "{.arg query_group} must be provided when query_collapsing is TRUE",
+          message_type = "error"
+        )
+      }
+      query <- Seurat::AverageExpression(
+        object = srt_query,
+        features = colnames(ref),
+        layer = "data",
+        assays = query_assay,
+        group.by = "query_group",
+        verbose = FALSE
+      )[[1]]
+      query <- Matrix::t(log1p(query))
+      query_group_names <- levels(droplevels(as.factor(
+        srt_query[["query_group", drop = TRUE]]
+      )))
+      if (length(query_group_names) == nrow(query)) {
+        rownames(query) <- query_group_names
+      }
+    } else {
+      query <- Matrix::t(
+        GetAssayData5(
+          srt_query,
+          layer = "data",
+          assay = query_assay
+        )[colnames(ref), , drop = FALSE]
+      )
+    }
+  }
+
+  if (isFALSE(use_reduction)) {
+    status_dat <- CheckDataType(query, verbose = FALSE)
+    log_message("Detected query data type: {.val {status_dat}}", verbose = verbose)
+    status_ref <- CheckDataType(ref, verbose = FALSE)
+    log_message("Detected reference data type: {.val {status_ref}}", verbose = verbose)
+    if (status_ref != status_dat || any(status_dat == "unknown", status_ref == "unknown")) {
+      log_message(
+        "Data type is unknown or different between query and reference",
+        message_type = "warning",
+        verbose = verbose
+      )
+    }
+  }
+
+  log_message("Calculate similarity...", verbose = verbose)
+
+  if (is.null(nn_method)) {
+    if (as.numeric(nrow(query)) * as.numeric(nrow(ref)) >= 1e8) {
+      nn_method <- "annoy"
+    } else {
+      nn_method <- "raw"
+    }
+  }
+  log_message("Use {.pkg {nn_method}} method to find neighbors", verbose = verbose)
+  if (!nn_method %in% c("raw", "annoy", "rann")) {
+    log_message(
+      "nn_method must be one of raw, rann, and annoy",
+      message_type = "error"
+    )
+  }
+  if (
+    nn_method == "annoy" &&
+      !distance_metric %in% c("euclidean", "cosine", "manhattan", "hamming")
+  ) {
+    log_message(
+      "distance_metric must be one of euclidean, cosine, manhattan, and hamming when nn_method='annoy'",
+      message_type = "error"
+    )
+  }
+  if (isTRUE(return_full_distance_matrix) && nn_method != "raw") {
+    log_message(
+      "Distance matrix will not be returned besause nn_method is not 'raw'",
+      message_type = "warning",
+      verbose = verbose
+    )
+    return_full_distance_matrix <- FALSE
+  }
+  simil_methods <- c(
+    "cosine",
+    "pearson",
+    "spearman",
+    "correlation",
+    "jaccard",
+    "ejaccard",
+    "dice",
+    "edice",
+    "hamman",
+    "simple matching",
+    "faith"
+  )
+  dist_methods <- c(
+    "euclidean",
+    "chisquared",
+    "kullback",
+    "manhattan",
+    "maximum",
+    "canberra",
+    "minkowski",
+    "hamming"
+  )
+  if (!(distance_metric %in% c(simil_methods, dist_methods))) {
+    log_message(
+      "{.val {distance_metric}} method is invalid",
+      message_type = "error"
+    )
+  }
+
+  native_knn <- if (
+    identical(nn_method, "raw") &&
+      !isTRUE(return_full_distance_matrix)
+  ) {
+    knn_cross_topk_native(
+      reference = ref,
+      query = query,
+      k = k,
+      distance_metric = distance_metric
+    )
+  } else {
+    NULL
+  }
+  if (!is.null(native_knn)) {
+    match_k <- native_knn[["idx"]]
+    rownames(match_k) <- rownames(query)
+    match_k_cell <- matrix(
+      rownames(ref)[match_k],
+      nrow = nrow(match_k),
+      ncol = ncol(match_k),
+      dimnames = list(rownames(query), NULL)
+    )
+    match_k_distance <- native_knn[["distance"]]
+    rownames(match_k_distance) <- rownames(query)
+  } else if (nn_method %in% c("annoy", "rann")) {
+    query.neighbor <- FindNeighbors(
+      query = query,
+      object = ref,
+      k.param = k,
+      nn.method = nn_method,
+      annoy.metric = distance_metric,
+      return.neighbor = TRUE
+    )
+    match_k <- query.neighbor@nn.idx
+    rownames(match_k) <- rownames(query)
+    match_k_cell <- knn_indices_to_names(match_k, rownames(ref))
+    match_k_distance <- query.neighbor@nn.dist
+    rownames(match_k_distance) <- rownames(query)
+  } else {
+    if (distance_metric %in% c(simil_methods, "pearson", "spearman")) {
+      if (distance_metric %in% c("pearson", "spearman")) {
+        if (distance_metric == "spearman") {
+          ref <- knn_rank_rows(ref)
+          query <- knn_rank_rows(query)
+        }
+        distance_metric <- "correlation"
+      }
+      d <- 1 -
+        proxyC::simil(
+          x = SeuratObject::as.sparse(ref),
+          y = SeuratObject::as.sparse(query),
+          method = distance_metric,
+          use_nan = TRUE
+        )
+    } else if (distance_metric %in% dist_methods) {
+      d <- proxyC::dist(
+        x = SeuratObject::as.sparse(ref),
+        y = SeuratObject::as.sparse(query),
+        method = distance_metric,
+        use_nan = TRUE
+      )
+    }
+    knn_topk <- run_dense_topk(
+      x = d,
+      k = k,
+      by = "col",
+      decreasing = FALSE
+    )
+    match_k_cell <- matrix(
+      rownames(d)[knn_topk[["idx"]]],
+      nrow = nrow(knn_topk[["idx"]]),
+      ncol = ncol(knn_topk[["idx"]]),
+      dimnames = list(colnames(d), NULL)
+    )
+    match_k_distance <- knn_topk[["value"]]
+    rownames(match_k_distance) <- colnames(d)
+  }
+
+  log_message("Predict cell type...", verbose = verbose)
+  match_prob <- NULL
+  if (!is.null(srt_ref) && (isFALSE(ref_collapsing) || isTRUE(use_reduction))) {
+    level <- as.character(unique(srt_ref[["ref_group", drop = TRUE]]))
+    if (k == 1) {
+      match_best <- srt_ref[["ref_group", drop = TRUE]][match_k_cell[, 1]]
+      names(match_best) <- names(match_k_cell[, 1])
+    } else {
+      rn <- rownames(match_k_cell)
+      match_k_cell <- matrix(
+        srt_ref[["ref_group", drop = TRUE]][match_k_cell],
+        nrow = nrow(match_k_cell),
+        ncol = ncol(match_k_cell)
+      )
+      rownames(match_k_cell) <- rn
+      vote <- knn_vote_labels(match_k_cell, levels = level)
+      match_prob <- vote$probability
+      rownames(match_prob) <- rn
+      match_best <- vote$best
+    }
+  } else {
+    match_best <- match_k_cell[, 1]
+  }
+
+  result <- list(
+    features = features,
+    nn_method = nn_method,
+    distance_metric = distance_metric,
+    k = k,
+    other_params = list(
+      query_group = query_group,
+      query_reduction = query_reduction,
+      query_assay = query_assay,
+      query_dims = query_dims,
+      query_collapsing = query_collapsing,
+      ref_group = ref_group,
+      ref_reduction = ref_reduction,
+      ref_assay = ref_assay,
+      ref_dims = ref_dims,
+      ref_collapsing = ref_collapsing
+    )
+  )
+  result[["match_best"]] <- match_best
+  if (!is.null(match_prob)) {
+    result[["match_prob"]] <- match_prob
+  }
+  result[["match_k_cell"]] <- match_k_cell
+  result[["match_k_distance"]] <- match_k_distance
+  if (isTRUE(return_full_distance_matrix)) {
+    result[["distance_matrix"]] <- d[seq_len(nrow(d)), , drop = FALSE]
+  }
+
+  srt_query@tools[[paste0(prefix, "_classification")]] <- result
+
+  if (isTRUE(query_collapsing)) {
+    query_index <- as.character(
+      srt_query[["query_group", drop = TRUE]]
+    )
+    cell_type_to_id <- split(colnames(srt_query), query_index)
+    classification <- unlist(
+      lapply(
+        names(match_best), function(ct) {
+          rep(match_best[ct], length(cell_type_to_id[[ct]]))
+        }
+      )
+    )
+    names(classification) <- unlist(cell_type_to_id)
+  } else {
+    query_index <- colnames(srt_query)
+    classification <- match_best[query_index]
+    names(classification) <- query_index
+  }
+
+  srt_query[[paste0(prefix, "_classification")]] <- classification
+
+  if (!is.null(match_prob)) {
+    match_prob_max <- knn_match_prob_max(match_prob)
+    if (isTRUE(query_collapsing)) {
+      prob <- unlist(lapply(names(match_best), function(ct) {
+        rep(match_prob_max[ct], length(cell_type_to_id[[ct]]))
+      }))
+      names(prob) <- unlist(cell_type_to_id)
+    } else {
+      prob <- match_prob_max[query_index]
+      names(prob) <- query_index
+    }
+    srt_query[[paste0(prefix, "_prob")]] <- prob
+  } else {
+    distance <- match_k_distance[, 1]
+    if (distance_metric %in% c(simil_methods, "pearson", "spearman")) {
+      if (isTRUE(query_collapsing)) {
+        simil <- unlist(lapply(names(match_best), function(ct) {
+          rep((1 - distance)[ct], length(cell_type_to_id[[ct]]))
+        }))
+        names(simil) <- unlist(cell_type_to_id)
+      } else {
+        simil <- (1 - distance)[query_index]
+        names(simil) <- query_index
+      }
+      srt_query[[paste0(prefix, "_simil")]] <- simil
+    } else {
+      if (isTRUE(query_collapsing)) {
+        dist <- unlist(lapply(names(match_best), function(ct) {
+          rep(distance[ct], length(cell_type_to_id[[ct]]))
+        }))
+        names(dist) <- unlist(cell_type_to_id)
+      } else {
+        dist <- distance[query_index]
+        names(dist) <- query_index
+      }
+      srt_query[[paste0(prefix, "_dist")]] <- dist
+    }
+  }
+
+  if (is.numeric(filter_lowfreq) && filter_lowfreq > 0) {
+    drop <- table(srt_query[[paste0(prefix, "_classification"), drop = TRUE]])
+    drop <- names(drop)[drop <= filter_lowfreq]
+    srt_query[[paste0(prefix, "_classification"), drop = TRUE]][
+      srt_query[[paste0(prefix, "_classification"), drop = TRUE]] %in% drop
+    ] <- "unreliable"
+  }
+
+  return(srt_query)
+}
+knn_match_prob_max <- function(match_prob) {
+  check_r("matrixStats", verbose = FALSE)
+  out <- matrixStats::rowMaxs(as.matrix(match_prob))
+  names(out) <- rownames(match_prob)
+  out
+}
+
+knn_vote_labels <- function(labels, levels = unique(as.character(labels))) {
+  labels <- as.matrix(labels)
+  levels <- as.character(levels)
+  codes <- matrix(
+    match(as.character(labels), levels),
+    nrow = nrow(labels),
+    ncol = ncol(labels),
+    dimnames = dimnames(labels)
+  )
+  out <- knn_vote_labels_cpp(codes, length(levels))
+  probability <- out$probability
+  dimnames(probability) <- list(rownames(labels), levels)
+  best <- rep(NA_character_, nrow(labels))
+  keep <- !is.na(out$best)
+  best[keep] <- levels[out$best[keep]]
+  names(best) <- rownames(labels)
+  list(probability = probability, best = best)
+}

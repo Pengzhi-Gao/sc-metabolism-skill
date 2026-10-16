@@ -1,0 +1,8 @@
+{
+  "input": "../upstream/scFEA-master/input/Melissa_full.csv",
+  "output": "../demo_results/scfea-source-demo",
+  "species": "human",
+  "methods": ["scfea"],
+  "database": "KEGG",
+  "scfea_epochs": 100
+}

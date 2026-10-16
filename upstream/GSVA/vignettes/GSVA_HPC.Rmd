@@ -1,0 +1,355 @@
+---
+title: "Running GSVA in HPC and cloud environments"
+author:
+- name: Robert Castelo
+  affiliation:
+  - &idupf Dept. of Medicine and Life Sciences, Universitat Pompeu Fabra, Barcelona, Spain
+  email: robert.castelo@upf.edu
+abstract: >
+  Here we illustrate how to use GSVA in an HPC environment, and how to access
+  GSVA ranks stored in cloud object storage or on HTTPS servers, without the
+  need to download them.
+date: "`r BiocStyle::doc_date()`"
+package: "`r pkg_ver('GSVA')`"
+vignette: >
+  %\VignetteIndexEntry{Running GSVA in HPC and cloud environments}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteKeywords{GeneExpression, Microarray, RNAseq, GeneSetEnrichment, Pathway}
+output:
+  BiocStyle::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    fig_captions: yes
+bibliography: GSVA.bib
+---
+
+**License**: `r packageDescription("GSVA")[["License"]]`
+
+```{r setup, include=FALSE}
+options(width=80)
+knitr::opts_chunk$set(collapse=TRUE,
+                      message=FALSE,
+                      warning=FALSE,
+                      comment="",
+                      fig.align="center",
+                      fig.wide=TRUE)
+```
+
+# Introduction
+
+Splitting GSVA calculations in parallel on a multicore shared-memory computer is
+directly supported in the functions `gsva()`, `gsvaRowNorm()`, `gsvaColRanks()`
+and `gsvaColScores()`, by using the `BPPARAM` parameter with backends such
+as `BiocParallel::MulticoreParam()` or `BiocParallel::SnowParam()`. However,
+running GSVA in a high-performance computing (HPC) environment, distributing the
+computational load across multiple independent nodes that do not share their
+main memory, requires using some additional functions for that purpose. In this
+vignette we illustrate this use case assuming our HPC environment uses the
+[SLURM](https://slurm.schedmd.com) workload manager. Other workload managers
+can be used, please consult the documentation of the `r Biocpkg("BiocParallel")`
+package for more information, or open an
+[issue](https://github.com/rcastelo/GSVA/issues/new/choose) in the GSVA GitHub
+repo if you need help with a different workload manager.
+
+In essence, we will be using the three-step GSVA pipeline, illustrated in the
+scRNA-seq vignette, with the additional parameters `first` and `last`, which
+allow the algorithm to run on a subset of rows (`gsvaRowNorm()`) or columns
+(`gsvaColRanks()` and `gsvaColScores()`) of the input data, storing the
+intermediate results using on-disk data structures, and merging them into a
+final single output object that will store the enrichment scores using also
+an on-disk data structure. We will not have to worry about how to split the
+input data and merge the intermediate results. These two tasks will be executed
+by the functions `gsvaMap()` and `gsvaReduce()`.
+
+In the last section, we show how GSVA column ranks stored in Apache Parquet
+format in cloud object storage, such as Amazon S3 or Google Cloud Storage
+(GCS), or on HTTPS public servers, can be accessed lazily, downloading only the
+parts of the data that each calculation needs.
+
+# Using a SLURM workload manager
+
+Let's assume we have run the first part of the scRNA-seq vignette, and we have
+obtained a `SingleCellExperiment` object called `sce` with filtered and
+normalized expression values, and a collection of gene sets stored in an object
+called `gsets`.
+
+We first build a parameter object using the function `gsvaParam()`, as we would
+normally do.
+
+```{r, eval=FALSE}
+gsvapar <- gsvaParam(sce, gsets)
+```
+We would then build a `BatchtoolsParam` object, as described in the
+corresponding
+[vignette](https://bioconductor.org/packages/release/bioc/vignettes/BiocParallel/inst/doc/BiocParallel_BatchtoolsParam.html)
+of the `r Biocpkg("BiocParallel")` package. The GSVA package, however, provides
+a convenience function called `gsvaBatchtoolsSlurmParam()` that will build a
+`BatchtoolsParam` object with some sensible settings for running GSVA in an HPC
+environment with a SLURM workload manager.
+
+```{r, eval=FALSE}
+gsvabtpar <- gsvaBatchtoolsSlurmParam(partition="short", nodes=10,
+                                      ncpus_per_task=4)
+```
+In this example, we are distributing the computational load across 10 nodes, where
+in each of them calculations will be done in parallel using 4 CPU cores, sending
+the corresponding jobs to a partition called `short`. By default, the function
+`gsvaBatchtoolsSlurmParam()` has a first argument `dir="GSVAOUTPUT"`, which will
+create a directory called `GSVAOUTPUT` in the current working directory, where
+the intermediate results will be stored. The user can change this directory by
+specifying a different value for the `dir` argument, but it is important that this
+directory is accessible from all nodes in the HPC environment. The user is also
+responsible for deleting the contents of this directory after the GSVA calculations
+are finished. Each job saves its results under a temporary name ending in
+`.partial`, which it renames once they are complete, so files with that ending
+left in this directory belong to jobs that did not finish, and can be deleted once
+no job of those calculations is running.
+
+The memory requested for each job, given by the `mem` argument of
+`gsvaBatchtoolsSlurmParam()`, with a default value of `"10G"`, is also the maximum
+main memory that GSVA will attempt to use in that job. Each job runs one R process
+and, with more than one CPU core per job, as many parallel workers, and each of
+these R processes takes about 0.8 GB by itself for loading GSVA and the packages it
+depends on. Therefore, the memory requested for each job should be at least
+`(1 + ncpus_per_task)` times 0.8 GB, i.e., 4 GB in the previous example, plus the
+memory needed by the calculations on each chunk of the input data. The function
+`gsvaBatchtoolsSlurmParam()` gives a warning when the memory requested for each job
+is smaller than the former, while the function `gsvaMap()`, before submitting any
+job, gives an error in that case, because such jobs would be killed by the workload
+manager, and a warning when it estimates that the calculations on each chunk of the
+input data require more memory than requested, suggesting in both cases to use
+fewer CPU cores per job or to request more memory. The job scripts are written
+from a template provided by GSVA, which requests this memory for the whole job;
+clusters that require their own template, e.g., to load modules or to set an
+account, can give it in the `template` argument of `gsvaBatchtoolsSlurmParam()`,
+and it should also request the memory for the whole job (`--mem`) instead of
+for each CPU core (`--mem-per-cpu`).
+
+The function `gsvaMap()` splits the input data into chunks, whose number depends
+on the size of the input data and on the memory requested for each job, and
+distributes them among the `nodes` jobs, each of which processes its chunks one
+after another. By default, `gsvaBatchtoolsSlurmParam()` does not request any time
+limit for the jobs, which then take the default time limit of the partition,
+bounded by its maximum time limit; the SLURM command `scontrol show partition`
+shows both of them in the fields `DefaultTime` and `MaxTime`. A time limit can
+be requested with the `walltime` argument, written as in the `--time` option of
+the SLURM command `sbatch`, e.g., `walltime=90` or `walltime="1:30:00"` for one
+hour and a half, or `walltime="2-0"` for two days, which should be long enough
+for each job to process about the number of chunks divided by `nodes`.
+With the argument `arrayjobs=TRUE`, each job is sent instead as an array job,
+whose tasks process one chunk each, one after another, so that the time limit
+in `walltime` applies to each chunk, the scheduler may start the shorter tasks
+sooner, and a task ended by SLURM, e.g., for exceeding its memory or time
+limit, does not prevent the next tasks from processing their chunks. In both
+cases, at most `nodes` jobs or tasks run at the same time, and the chunks of
+those ended by SLURM can be resubmitted as described below.
+
+The next step is to run the function `gsvaMap()`, which will submit the jobs to the
+SLURM workload manager, and return a list object, where each of its elements will be
+the path to the intermediate results of one chunk of the input data, saved in the
+`GSVAOUTPUT` directory with the function `saveHDF5GSVA()`. Saving these results
+to disk is the default behavior of `gsvaMap()` when jobs are sent to a workload
+manager, such as SLURM, and can be changed with the `output` argument of
+`gsvaMap()`.
+
+```{r, eval=FALSE}
+gsvamaprnorm <- gsvaMap(gsvaRowNorm, gsvapar, BTPARAM=gsvabtpar)
+```
+The final step is to merge the intermediate results into a single object, using
+the function `gsvaReduce()`, which in this example will return a
+`SingleCellExperiment` object with the row-normalized values stored in an
+assay called `gsvarnorm`.
+
+```{r, eval=FALSE}
+gsvarnorm <- gsvaReduce(gsvamaprnorm)
+```
+To complete the three-step GSVA pipeline, we would then calculate the column
+rank values using the function `gsvaColRanks()`, and finally the GSVA scores
+using the function `gsvaColScores()`, as we would normally do in a single-node
+environment, but using `gsvaMap()` and `gsvaReduce()`, this time for a more
+compact coding in single line of code each.
+
+```{r, eval=FALSE}
+gsvaranks <- gsvaReduce(gsvaMap(gsvaColRanks, gsvarnorm, BTPARAM=gsvabtpar))
+gsvaes <- gsvaReduce(gsvaMap(gsvaColScores, gsvaranks, BTPARAM=gsvabtpar))
+```
+Since the calculations of the column ranks and enrichment scores are both done
+on the columns of the input data, we can reuse the output of `gsvaMap()`
+obtained from the rank calculations, directly to the input of `gsvaMap()` for
+the enrichment score calculations, without having to reduce the intermediate
+results into a single object, avoiding the overhead of that unnecessary
+reduction.
+
+```{r, eval=FALSE}
+gsvamapranks <- gsvaMap(gsvaColRanks, gsvarnorm, BTPARAM=gsvabtpar)
+gsvaes <- gsvaReduce(gsvaMap(gsvaColScores, gsvamapranks, BTPARAM=gsvabtpar))
+```
+The current implementation using the `BatchtoolsParam` backend makes the
+`gsvaMap()` function blocking, waiting for all jobs to finish before returning
+a list object with the intermediate results. There are currently two ways to
+circumvent this limitation. The first one is to use a terminal multiplexer such
+as [tmux](https://github.com/tmux/tmux/wiki), log interactively into a node of
+the HPC environment using a job submission command such as:
+
+```{r, eval=FALSE}
+srun --mpi=none --mem=10G --nodes=1 --ntasks-per-node=1 \
+     --partition=short --pty bash -i
+```
+start an R session, call interactively the `gsvaMap()` function and detach the
+tmux session to be able to log out and leave the jobs running in the background.
+You may reattach to the tmux session later to check the progress of the jobs or
+fetch the results. Note that the partition where the interactive job is
+submitted must have a walltime limit that is long enough to allow the jobs to finish.
+
+The second way is to submit a job with the R script that calls the `gsvaMap()`
+function, which will submit the jobs to the SLURM workload manager.
+
+## Resubmitting failed chunks
+
+If the calculations on some of the chunks of the input data fail, `gsvaMap()`
+gives a warning and returns a partial result, in which the elements of the
+failed chunks are condition objects describing the errors. Such a partial
+result cannot be given to `gsvaReduce()`, but it can be given to the `MAPREDO`
+argument of a new call to `gsvaMap()`, with the same `FUN` and `inputData`
+arguments, to compute only the failed chunks, using the same chunk boundaries
+as in the previous call. This allows one, for instance, to resubmit the failed
+chunks with more memory per task.
+
+```{r, eval=FALSE}
+gsvamapes <- gsvaMap(gsvaColScores, gsvamapranks, BTPARAM=gsvabtpar)
+gsvabtpar2 <- gsvaBatchtoolsSlurmParam(partition="short", nodes=10,
+                                       ncpus_per_task=4, mem="20G")
+gsvamapes <- gsvaMap(gsvaColScores, gsvamapranks, BTPARAM=gsvabtpar2,
+                     MAPREDO=gsvamapes)
+gsvaes <- gsvaReduce(gsvamapes)
+```
+Since `gsvaMap()` saves the results of each chunk to disk as soon as it is
+completed, chunks of jobs killed by the workload manager, for instance for
+exceeding their wall time or memory limits, are also reported as failed in the
+partial result, and can be resubmitted in the same way. If the R session that
+called `gsvaMap()` ended before the jobs finished, for instance because it was
+running in an interactive job that reached its own wall time limit, the
+partial result is not available. In that case, we can give to the `MAPREDO`
+argument the directory where `gsvaMap()` saved the results, which by default
+is `GSVAOUTPUT`, and the chunks whose results are not found in that directory
+will be resubmitted.
+
+```{r, eval=FALSE}
+gsvamapes <- gsvaMap(gsvaColScores, gsvamapranks, BTPARAM=gsvabtpar,
+                     MAPREDO="GSVAOUTPUT")
+```
+To find the results of a previous call, `gsvaMap()` writes in that directory a
+manifest file, whose name ends in `_manifest.rds`, and gives the results of
+each chunk a file name that only depends on the input data, the output format
+and the chunk boundaries. For this reason, calling `gsvaMap()` again with the
+same input data and output format, without the `MAPREDO` argument, gives an
+error when that directory already has the results of a previous call. The input
+data is identified by its dimensions, dimension names and GSVA parameters, but
+not by its values, so the user should not change the values of the input data
+between the call to `gsvaMap()` and the one resubmitting the failed chunks.
+
+Note that `gsvaMap()` may take a few minutes to return after the last job has
+ended when some jobs were killed, because `r CRANpkg("batchtools")` only
+considers that a job without results has ended after not finding it in the
+queue of the workload manager in several consecutive checks. To shorten this
+delay, `gsvaBatchtoolsSlurmParam()` writes in the directory given in its `dir`
+argument a batchtools configuration file that makes those checks at most 30
+seconds apart, instead of up to two minutes.
+
+# Accessing remotely stored GSVA ranks
+
+Column ranks calculated with `gsvaColRanks()` can be stored in a single file in
+[Apache Parquet](https://parquet.apache.org) format with the function
+`saveParquetGSVA()`. This requires having installed the CRAN package
+[arrow](https://cran.r-project.org/package=arrow) [@richardson2026arrow].
+
+```{r, eval=FALSE}
+saveParquetGSVA(gsvaranks, "gsvaranks.parquet")
+```
+When the ranks are calculated with `gsvaMap()` in an HPC environment, as in the
+previous section, the results of each worker can be directly saved in Parquet
+format with the argument `output="Parquet"` in the call to `gsvaMap()`, and
+then those results can be combined into a single file with `gsvaReduce()` and
+stored in a single Parquet file with `saveParquetGSVA()`.
+
+```{r, eval=FALSE}
+gsvamapranks <- gsvaMap(gsvaColRanks, gsvarnorm, output="Parquet",
+                        BTPARAM=gsvabtpar)
+saveParquetGSVA(gsvaReduce(gsvamapranks), "gsvaranks.parquet")
+```
+The particular Parquet format file written by GSVA is organized to enable
+efficiently reading blocks of columns, such as when we want to calculate
+enrichment scores for our gene sets of interest. This is useful when the
+Parquet file with GSVA ranks has been uploaded to a cloud storage bucket in
+Amazon S3 or GCS, e.g., with the command-line tools `aws s3 cp` or
+`gcloud storage cp`, because it can be lazily loaded with the function
+`loadParquetGSVA()`, giving an `s3://` or `gs://` URI as the main file
+argument, i.e., without downloading the whole Parquet file.
+
+```{r, eval=FALSE}
+gsvaranks <- loadParquetGSVA("s3://my-bucket/gsvaranks.parquet")
+```
+Loading the file only downloads its metadata, including the row and column
+data of the original object, such as the `colData()` of a
+`SingleCellExperiment`, while the ranks themselves are downloaded only when
+they are needed, in the blocks of columns that each calculation reads. For
+instance, we can calculate GSVA scores for a new collection of gene sets
+without downloading the whole matrix of ranks at once, since they will be
+read and processed by blocks of columns.
+
+```{r, eval=FALSE}
+gsvaes <- gsvaColScores(gsvaranks, geneSets=newgsets)
+```
+In the same way, calculating the enrichment data of a single gene set in a
+single column, e.g., a single cell, with the function `gsvaEnrichment()`,
+only downloads the chunk of columns that contains that column.
+
+```{r, eval=FALSE}
+res <- gsvaEnrichment(gsvaranks, column=10000, geneSet=newgsets[[1]])
+```
+Accessing the file requires an arrow installation with support for the
+corresponding cloud storage, which can be checked with
+`arrow::arrow_with_s3()` and `arrow::arrow_with_gcs()`^[Note that CRAN builds of arrow include S3 support but not GCS support. The latter can be obtained by installing arrow from R-universe; see https://arrow.apache.org/docs/r/articles/fs.html].
+Files stored in private cloud storage buckets require the arrow package to
+read the necessary credentials to access them. Please consult the corresponding
+documentation for AWS and GCS on how to set up the credentials in your system.
+Files in public S3 buckets can be accessed directly with the `s3://` URI, e.g.,
+`s3://my-bucket/gsvaranks.parquet`, which already requests anonymous access,
+while files in public GCS buckets should be specified with URIs of the form
+`gs://anonymous@my-bucket/gsvaranks.parquet` to request anonymous access. See
+`help(loadParquetGSVA)` for further details.
+
+Parquet files with GSVA ranks deposited on public HTTPS servers can be also
+lazily loaded in the same way, by giving their `https://` URL to
+`loadParquetGSVA()`. In this case, the file is read using the API of the CRAN
+package [duckdb](https://cran.r-project.org/package=duckdb)
+[@muehleisen2026duckdb], which needs to be installed, and the HTTPS server must
+support HTTP range requests, which most servers do.
+
+```{r, eval=FALSE}
+gsvaranks <- loadParquetGSVA("https://my-server.org/data/gsvaranks.parquet")
+```
+The first time a file is accessed through HTTPS, the duckdb package downloads
+its extension `httpfs`, which GSVA keeps for subsequent R sessions. If the
+certificate of the HTTPS server cannot be verified, e.g., because the server
+does not send its intermediate certificates, a file with the certificates of
+the certification authorities can be given with
+`options(GSVA.ca_cert_file="<file>")`.
+
+Since each block of columns is downloaded every time it is read, the time
+to access the data depends mostly on the network, and it will be shorter
+when the cloud storage bucket is located in a region close to where the
+calculations run. If the same ranks are going to be processed many times, it
+may be faster to download the file once and work with the local copy.
+
+# Session information {.unnumbered}
+Here is the output of `sessionInfo()` on the system on which this document was
+compiled running pandoc `r rmarkdown::pandoc_version()`:
+
+```{r session_info, cache=FALSE}
+sessionInfo()
+```
+
+# References

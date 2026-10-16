@@ -1,0 +1,189 @@
+#' @title RunSlingshot
+#'
+#' @md
+#' @inheritParams CellDimPlot
+#' @param dims The dimensions to use for the Slingshot algorithm.
+#' Default is `NULL`, which uses first two dimensions.
+#' @param start The starting group for the Slingshot algorithm.
+#' @param end The ending group for the Slingshot algorithm.
+#' @param prefix The prefix to add to the column names of the resulting pseudotime variable.
+#' @param reverse Whether to reverse the pseudotime variable.
+#' @param align_start Whether to align the starting pseudotime values at the maximum pseudotime.
+#' @param show_plot Whether to show the dimensionality plot.
+#' @param lineage_palette The color palette to use for the lineages in the plot.
+#' @param ... Passed to the [slingshot::slingshot] function.
+#'
+#' @seealso [CellDimPlot], [RunDynamicFeatures], [RunDynamicEnrichment]
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunSlingshot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP"
+#' )
+#' pancreas_sub <- RunSlingshot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "PCA"
+#' )
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   lineages = paste0("Lineage", 1:2),
+#'   lineages_span = 0.1
+#' )
+#'
+#' # 3D lineage
+#' pancreas_sub <- RunSlingshot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "StandardpcaUMAP3D"
+#' )
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   lineages = paste0("Lineage", 1:2),
+#'   lineages_span = 0.1,
+#'   lineages_trim = c(0.05, 0.95)
+#' )
+RunSlingshot <- function(
+  object,
+  group.by,
+  reduction = NULL,
+  dims = NULL,
+  start = NULL,
+  end = NULL,
+  prefix = NULL,
+  reverse = FALSE,
+  align_start = FALSE,
+  show_plot = TRUE,
+  lineage_palette = "Dark2",
+  seed = 11,
+  ...,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  check_r("slingshot", verbose = FALSE)
+  if (missing(group.by)) {
+    log_message(
+      "{.arg group.by} must be provided",
+      message_type = "error"
+    )
+  }
+  if (is.null(reduction)) {
+    reduction <- DefaultReduction(srt)
+  } else {
+    reduction <- DefaultReduction(srt, pattern = reduction)
+  }
+  if (is.null(prefix)) {
+    prefix <- ""
+  } else {
+    prefix <- paste0(prefix, "_")
+  }
+
+  if (min(table(srt[[group.by]])) < 2) {
+    celltypes <- names(which(table(srt[[group.by]]) < 2))
+    log_message(
+      "{.val {celltypes}} have less than 2 cells. Removed them",
+      message_type = "warning",
+      verbose = verbose
+    )
+    celltypes <- setdiff(names(table(srt[[group.by]])), celltypes)
+    srt <- srt[, select_cells(srt, celltypes, group.by)]
+  }
+
+  srt_sub <- srt[, !is.na(srt[[group.by, drop = TRUE]])]
+
+  if (is.null(dims)) {
+    dims <- 1:2
+  }
+
+  set.seed(seed)
+  sl <- slingshot::slingshot(
+    data = as.data.frame(
+      srt_sub[[reduction]]@cell.embeddings[, dims]
+    ),
+    clusterLabels = as.character(
+      srt_sub[[group.by, drop = TRUE]]
+    ),
+    start.clus = start,
+    end.clus = end,
+    ...
+  )
+
+  srt@tools[[paste("Slingshot", group.by, reduction, sep = "_")]] <- sl
+  df <- as.data.frame(slingshot::slingPseudotime(sl))
+  colnames(df) <- paste0(prefix, colnames(df))
+  if (isTRUE(reverse)) {
+    if (isTRUE(align_start)) {
+      df <- apply(df, 2, function(x) max(x, na.rm = TRUE) - x)
+    } else {
+      df <- max(df, na.rm = TRUE) - df
+    }
+  }
+  srt <- Seurat::AddMetaData(srt, metadata = df)
+  srt <- Seurat::AddMetaData(
+    srt,
+    metadata = slingshot::slingBranchID(sl),
+    col.name = paste0(prefix, "BranchID")
+  )
+
+  if (isTRUE(show_plot)) {
+    tryCatch(
+      {
+        if (
+          ncol(srt[[reduction]]@cell.embeddings) == 2 ||
+            ncol(srt[[reduction]]@cell.embeddings) > 3
+        ) {
+          p <- CellDimPlot(
+            srt,
+            group.by = group.by,
+            reduction = reduction,
+            dims = c(1, 2),
+            lineages = colnames(df)
+          )
+          print(p)
+        } else if (ncol(srt[[reduction]]@cell.embeddings) == 3) {
+          p <- CellDimPlot3D(
+            srt,
+            group.by = group.by,
+            reduction = reduction,
+            lineages = colnames(df)
+          )
+          print(p)
+        }
+      },
+      error = function(e) {
+        log_message(
+          paste0(
+            "Slingshot results were saved, but the lineage plot failed: ",
+            conditionMessage(e),
+            ". Use show_plot = FALSE and CellDimPlot() to plot later."
+          ),
+          message_type = "warning",
+          verbose = verbose
+        )
+      }
+    )
+  }
+  return(srt)
+}
+
+select_cells <- function(obj, celltypes, group.by) {
+  metadata <- obj@meta.data
+  cells_c <- c()
+  for (celltype in celltypes) {
+    cells_c <- c(
+      cells_c,
+      rownames(metadata[metadata[[group.by]] == celltype, ])
+    )
+  }
+  cells_c
+}

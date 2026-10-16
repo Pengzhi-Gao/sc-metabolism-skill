@@ -1,0 +1,901 @@
+gene_set_scoring_to_dgC <- function(expr) {
+  if (inherits(expr, "Matrix") && !inherits(expr, "dgCMatrix")) {
+    methods::as(expr, "dgCMatrix")
+  } else if (is.matrix(expr)) {
+    methods::as(Matrix::Matrix(expr, sparse = TRUE), "dgCMatrix")
+  } else if (!inherits(expr, "dgCMatrix")) {
+    expr_mat <- as_matrix(expr)
+    methods::as(Matrix::Matrix(expr_mat, sparse = TRUE), "dgCMatrix")
+  } else {
+    expr
+  }
+}
+
+gene_set_scoring_drop_stored_zeros <- function(expr) {
+  if (!inherits(expr, "sparseMatrix")) {
+    return(expr)
+  }
+  if (inherits(expr, "dgCMatrix") && !any(expr@x == 0)) {
+    return(expr)
+  }
+  Matrix::drop0(expr)
+}
+
+normalize_gene_set_scoring_method <- function(method, arg_name = "method") {
+  method_map <- c(
+    "seurat" = "Seurat",
+    "aucell" = "AUCell",
+    "ucell" = "UCell",
+    "gsva" = "GSVA",
+    "ssgsea" = "ssGSEA",
+    "zscore" = "zscore",
+    "plage" = "PLAGE",
+    "vision" = "VISION"
+  )
+  method_key <- tolower(as.character(method[[1]]))
+  if (!method_key %in% names(method_map)) {
+    log_message(
+      "{.arg {arg_name}} must be one of {.val {unname(method_map)}}",
+      message_type = "error"
+    )
+  }
+  unname(method_map[[method_key]])
+}
+
+gene_set_scoring_make_score_prefix <- function(prefix = NULL, fallback = NULL) {
+  prefix_use <- prefix %||% ""
+  prefix_use <- as.character(prefix_use[[1]])
+  if (!is.na(prefix_use) && nzchar(prefix_use)) {
+    return(prefix_use)
+  }
+  fallback_use <- fallback %||% ""
+  fallback_use <- as.character(fallback_use[[1]])
+  if (!is.na(fallback_use) && nzchar(fallback_use)) {
+    return(fallback_use)
+  }
+  ""
+}
+
+gene_set_scoring_make_score_colnames <- function(
+  feature_names,
+  prefix = NULL,
+  fallback = NULL
+) {
+  prefix_use <- gene_set_scoring_make_score_prefix(
+    prefix = prefix,
+    fallback = fallback
+  )
+  if (nzchar(prefix_use)) {
+    return(make.names(paste(prefix_use, feature_names, sep = "_")))
+  }
+  make.names(feature_names)
+}
+
+gene_set_scoring_make_classification_colname <- function(
+  prefix = NULL,
+  fallback = NULL
+) {
+  prefix_use <- gene_set_scoring_make_score_prefix(
+    prefix = prefix,
+    fallback = fallback
+  )
+  if (nzchar(prefix_use)) {
+    return(make.names(paste0(prefix_use, "_classification")))
+  }
+  "classification"
+}
+
+gene_set_scoring_indices <- function(gene_sets, feature_names) {
+  feature_idx <- stats::setNames(seq_along(feature_names), feature_names)
+  stats::setNames(
+    lapply(gene_sets, function(gs) {
+      idx <- unname(feature_idx[gs])
+      idx <- idx[!is.na(idx)]
+      unique(as.integer(idx))
+    }),
+    names(gene_sets)
+  )
+}
+
+gene_set_scoring_subset_to_index_union <- function(expr, gene_set_idx) {
+  union_idx <- sort(unique(unlist(gene_set_idx, use.names = FALSE)))
+  if (!length(union_idx)) {
+    return(list(expr = expr, gene_sets = gene_set_idx))
+  }
+  index_map <- integer(nrow(expr))
+  index_map[union_idx] <- seq_along(union_idx)
+  list(
+    expr = expr[union_idx, , drop = FALSE],
+    gene_sets = stats::setNames(
+      lapply(gene_set_idx, function(idx) {
+        as.integer(index_map[idx])
+      }),
+      names(gene_set_idx)
+    )
+  )
+}
+
+gene_set_scoring_drop_invalid_score_sets <- function(scores) {
+  keep <- colSums(!is.na(scores)) > 0
+  scores[, keep, drop = FALSE]
+}
+
+gene_set_scoring_normalize_chunk_size <- function(
+  chunk_size,
+  n_genes = NULL,
+  n_cells = NULL,
+  max_dense_entries = 1e8
+) {
+  if (
+    is.null(chunk_size) || length(chunk_size) == 0L || is.na(chunk_size[[1]])
+  ) {
+    if (
+      is.null(n_genes) ||
+        is.null(n_cells) ||
+        !is.finite(n_genes) ||
+        !is.finite(n_cells) ||
+        n_genes <= 0 ||
+        n_cells <= 0
+    ) {
+      return(0L)
+    }
+    chunk_size_auto <- floor(max_dense_entries / as.numeric(n_genes))
+    if (
+      !is.finite(chunk_size_auto) ||
+        chunk_size_auto <= 0 ||
+        chunk_size_auto >= n_cells
+    ) {
+      return(0L)
+    }
+    return(max(1L, as.integer(chunk_size_auto)))
+  }
+  if (
+    is.character(chunk_size[[1]]) && identical(tolower(chunk_size[[1]]), "auto")
+  ) {
+    return(gene_set_scoring_normalize_chunk_size(
+      chunk_size = NULL,
+      n_genes = n_genes,
+      n_cells = n_cells,
+      max_dense_entries = max_dense_entries
+    ))
+  }
+  if (is.na(chunk_size[[1]])) {
+    return(0L)
+  }
+  chunk_size_num <- suppressWarnings(as.numeric(chunk_size[[1]]))
+  if (!is.finite(chunk_size_num) || chunk_size_num <= 0) {
+    return(0L)
+  }
+  as.integer(chunk_size_num)
+}
+
+run_aucell_scores <- function(
+  expr_counts,
+  gene_sets,
+  strategy = c("sparse", "topk", "full"),
+  algorithm = c("aucell", "ctxcore"),
+  seed = 0L,
+  tie_method = c("first", "hash", "numpy"),
+  auc_threshold = 0.05,
+  normalize_by_signature_max = FALSE,
+  cores = NULL
+) {
+  strategy <- match.arg(strategy)
+  algorithm <- match.arg(algorithm)
+  tie_method <- match.arg(tie_method)
+  strategy_id <- c("topk" = 1L, "sparse" = 2L, "full" = 3L)[[strategy]]
+  algorithm_id <- c("aucell" = 1L, "ctxcore" = 2L)[[algorithm]]
+
+  gene_set_idx <- gene_set_scoring_indices(
+    gene_sets = gene_sets,
+    feature_names = rownames(expr_counts)
+  )
+  gene_set_idx <- gene_set_idx[lengths(gene_set_idx) > 0L]
+  if (length(gene_set_idx) == 0L) {
+    log_message(
+      "No gene sets retain genes after intersecting with the expression matrix",
+      message_type = "error"
+    )
+  }
+
+  expr_counts <- gene_set_scoring_to_dgC(expr_counts)
+  auc_threshold <- suppressWarnings(as.numeric(auc_threshold)[1L])
+  if (!is.finite(auc_threshold) || auc_threshold <= 0 || auc_threshold > 1) {
+    log_message(
+      "{.arg auc_threshold} must be one finite number in (0, 1]",
+      message_type = "error"
+    )
+  }
+  auc_max_rank <- ceiling(auc_threshold * nrow(expr_counts))
+  rank_seed <- switch(tie_method,
+    "first" = -1L,
+    "hash" = as.integer(seed %||% 0L),
+    "numpy" = -as.integer(seed %||% 0L) - 2L
+  )
+  scores <- aucell_auc_sparse(
+    expr = expr_counts,
+    gene_sets = gene_set_idx,
+    auc_max_rank = as.integer(auc_max_rank),
+    norm_auc = TRUE,
+    strategy = strategy_id,
+    algorithm = algorithm_id,
+    seed = rank_seed,
+    n_threads = scop_n_threads(cores)
+  )
+  dimnames(scores) <- list(colnames(expr_counts), names(gene_set_idx))
+  names(dimnames(scores)) <- c("cells", "gene sets")
+  if (isTRUE(normalize_by_signature_max)) {
+    maxima <- apply(scores, 2L, max, na.rm = TRUE)
+    valid <- is.finite(maxima) & maxima > 0
+    if (any(valid)) {
+      scores[, valid] <- sweep(
+        scores[, valid, drop = FALSE],
+        2L,
+        maxima[valid],
+        "/"
+      )
+    }
+  }
+  scores
+}
+
+run_ucell_scores <- function(
+  expr_counts,
+  gene_sets,
+  max_rank = 1500,
+  negative_weight = 1,
+  missing_genes = c("impute", "skip"),
+  ties_method = c("average", "min", "max", "dense", "first", "last"),
+  cores = NULL
+) {
+  missing_genes <- match.arg(missing_genes)
+  ties_method <- match.arg(ties_method)
+  max_rank <- suppressWarnings(as.integer(max_rank)[1])
+  negative_weight <- suppressWarnings(as.numeric(negative_weight)[1])
+  if (is.na(max_rank) || max_rank <= 0L) {
+    log_message("{.arg max_rank} must be a positive integer", message_type = "error")
+  }
+  if (!is.finite(negative_weight) || negative_weight < 0) {
+    log_message("{.arg negative_weight} must be a non-negative number", message_type = "error")
+  }
+  if (!is.list(gene_sets) || length(gene_sets) == 0L) {
+    log_message("{.arg gene_sets} must be a non-empty list", message_type = "error")
+  }
+  if (is.null(names(gene_sets))) {
+    names(gene_sets) <- paste0("signature_", seq_along(gene_sets))
+  } else {
+    invalid_names <- !nzchar(names(gene_sets)) | duplicated(names(gene_sets))
+    names(gene_sets)[invalid_names] <- paste0(
+      "signature_",
+      which(invalid_names)
+    )
+  }
+
+  expr_counts <- gene_set_scoring_to_dgC(expr_counts)
+  max_rank <- min(max_rank, nrow(expr_counts))
+  signature_lengths <- lengths(gene_sets)
+  if (any(signature_lengths > max_rank)) {
+    log_message(
+      "One or more signatures contain more genes than {.arg max_rank}",
+      message_type = "error"
+    )
+  }
+
+  feature_index <- stats::setNames(seq_len(nrow(expr_counts)), rownames(expr_counts))
+  positive_sets <- vector("list", length(gene_sets))
+  negative_sets <- vector("list", length(gene_sets))
+  positive_missing <- integer(length(gene_sets))
+  negative_missing <- integer(length(gene_sets))
+  for (set_index in seq_along(gene_sets)) {
+    signature <- as.character(gene_sets[[set_index]])
+    negative <- grep("-$", signature, perl = TRUE, value = TRUE)
+    positive <- setdiff(signature, negative)
+    positive <- gsub("\\+$", "", positive, perl = TRUE)
+    negative <- gsub("-$", "", negative, perl = TRUE)
+
+    positive_index <- unname(feature_index[positive])
+    negative_index <- unname(feature_index[negative])
+    if (identical(missing_genes, "impute")) {
+      positive_missing[[set_index]] <- sum(is.na(positive_index))
+      negative_missing[[set_index]] <- sum(is.na(negative_index))
+    }
+    positive_sets[[set_index]] <- as.integer(positive_index[!is.na(positive_index)])
+    negative_sets[[set_index]] <- as.integer(negative_index[!is.na(negative_index)])
+  }
+  names(positive_sets) <- names(gene_sets)
+  names(negative_sets) <- names(gene_sets)
+
+  scores <- ucell_scores_sparse(
+    expr = expr_counts,
+    positive_sets = positive_sets,
+    positive_missing = positive_missing,
+    negative_sets = negative_sets,
+    negative_missing = negative_missing,
+    max_rank = max_rank,
+    negative_weight = negative_weight,
+    tie_method = match(
+      ties_method,
+      c("average", "min", "max", "dense", "first", "last")
+    ),
+    n_threads = scop_n_threads(cores)
+  )
+  dimnames(scores) <- list(colnames(expr_counts), names(gene_sets))
+  names(dimnames(scores)) <- c("cells", "gene sets")
+  scores
+}
+
+run_aucell_official_scores <- function(
+  expr_counts,
+  gene_sets,
+  tie_method = c("first", "random"),
+  ...
+) {
+  check_r("AUCell", verbose = FALSE)
+  tie_method <- match.arg(tie_method)
+
+  if (identical(tie_method, "first")) {
+    dots <- list(...)
+    n_genes <- nrow(expr_counts)
+    if (!is.null(dots[["auc_max_rank"]])) {
+      auc_thr <- dots[["auc_max_rank"]] / max(n_genes, 1L)
+    } else if (!is.null(dots[["auc_threshold"]])) {
+      auc_thr <- dots[["auc_threshold"]]
+    } else {
+      auc_thr <- 0.05
+    }
+    return(run_aucell_scores(
+      expr_counts = expr_counts,
+      gene_sets = gene_sets,
+      strategy = "topk",
+      tie_method = "first",
+      auc_threshold = auc_thr,
+      cores = dots[["cores"]]
+    ))
+  }
+
+  calc_auc <- get_namespace_fun("AUCell", "AUCell_calcAUC")
+  expr_rank <- AUCell::AUCell_buildRankings(
+    as_matrix(expr_counts),
+    plotStats = FALSE
+  )
+  cells_auc <- calc_auc(
+    geneSets = gene_sets,
+    rankings = expr_rank,
+    ...
+  )
+  scores <- Matrix::t(AUCell::getAUC(cells_auc))
+  as_matrix(scores)
+}
+
+run_aucell_scores_from_official_rankings <- function(
+  rankings,
+  gene_sets,
+  auc_max_rank = ceiling(0.05 * nrow(rankings)),
+  norm_auc = TRUE
+) {
+  check_r("AUCell", verbose = FALSE)
+  if (!methods::is(rankings, "aucellResults")) {
+    log_message("rankings must be an aucellResults object from AUCell_buildRankings()", message_type = "error")
+  }
+  if (!is.list(gene_sets) || is.null(names(gene_sets))) {
+    log_message("gene_sets must be a named list", message_type = "error")
+  }
+  auc_max_rank <- suppressWarnings(as.integer(round(auc_max_rank[[1L]])))
+  if (is.na(auc_max_rank) || auc_max_rank <= 0L) {
+    log_message("auc_max_rank must be a positive value", message_type = "error")
+  }
+
+  rank_mat <- AUCell::getRanking(rankings)
+  gene_sets <- lapply(gene_sets, unique)
+  gene_sets <- gene_sets[lengths(gene_sets) > 0L]
+  if (length(gene_sets) == 0L) {
+    log_message("No gene sets provided or remaining.", message_type = "error")
+  }
+  gene_set_idx <- gene_set_scoring_indices(gene_sets, rownames(rank_mat))
+  n_genes <- lengths(gene_sets)
+  missing_percent <- (n_genes - lengths(gene_set_idx)) / n_genes
+  if (all(missing_percent >= 0.8)) {
+    log_message(
+      "Fewer than 20% of the genes in the gene sets are included in the rankings.",
+      " Check whether the gene IDs in the rankings and gene sets match.",
+      message_type = "error"
+    )
+  }
+  keep <- missing_percent < 0.8
+  gene_set_idx <- gene_set_idx[keep]
+  if (length(gene_set_idx) == 0L) {
+    log_message("No gene sets remain after AUCell gene-ID filtering.", message_type = "error")
+  }
+
+  scores <- aucell_auc_ranked_full(
+    rankings = as.matrix(rank_mat),
+    gene_sets = gene_set_idx,
+    auc_max_rank = auc_max_rank,
+    norm_auc = isTRUE(norm_auc)
+  )
+  dimnames(scores) <- list(colnames(rank_mat), names(gene_set_idx))
+  scores
+}
+
+run_aucell_scores_from_rankings <- function(rankings, gene_sets) {
+  if (!is.matrix(rankings)) {
+    rankings <- as.matrix(rankings)
+  }
+  if (is.null(rownames(rankings)) || is.null(colnames(rankings))) {
+    log_message(
+      "{.arg rankings} must have cell row names and gene column names",
+      message_type = "error"
+    )
+  }
+  gene_set_idx <- gene_set_scoring_indices(
+    gene_sets = gene_sets,
+    feature_names = colnames(rankings)
+  )
+  gene_set_idx <- gene_set_idx[lengths(gene_set_idx) > 0L]
+  if (length(gene_set_idx) == 0L) {
+    log_message(
+      "No gene sets retain genes after intersecting with the ranking matrix",
+      message_type = "error"
+    )
+  }
+  auc_max_rank <- round(0.05 * ncol(rankings))
+  scores <- aucell_auc_ranked(
+    rankings = rankings,
+    gene_sets = gene_set_idx,
+    auc_max_rank = as.integer(auc_max_rank)
+  )
+  dimnames(scores) <- list(rownames(rankings), names(gene_set_idx))
+  scores
+}
+
+run_seurat_module_scores <- function(
+  expr_data,
+  features,
+  pool = NULL,
+  nbin = 24,
+  ctrl = 100,
+  seed = 11,
+  cores = NULL
+) {
+  set.seed(seed = seed)
+  expr_data <- gene_set_scoring_to_dgC(expr_data)
+  pool <- pool %||% rownames(expr_data)
+  pool <- intersect(pool, rownames(expr_data))
+  if (length(pool) == 0L) {
+    log_message(
+      "{.arg pool} has no overlap with expression features",
+      message_type = "error"
+    )
+  }
+
+  features <- lapply(features, function(x) intersect(x, rownames(expr_data)))
+  keep <- lengths(features) > 0L
+  features <- features[keep]
+  if (length(features) == 0L) {
+    log_message(
+      "No feature sets retain genes after intersecting with the expression matrix",
+      message_type = "error"
+    )
+  }
+
+  data_avg <- Matrix::rowMeans(expr_data[pool, , drop = FALSE])
+  data_avg <- data_avg[order(data_avg)]
+  data_cut <- ggplot2::cut_number(
+    data_avg + stats::rnorm(n = length(data_avg)) / 1e+30,
+    n = nbin,
+    labels = FALSE,
+    right = FALSE
+  )
+  names(data_cut) <- names(data_avg)
+
+  control_sets <- lapply(features, function(features_use) {
+    ctrl_use <- unlist(
+      lapply(
+        seq_len(length(features_use)),
+        function(j) {
+          data_cut[which(data_cut == data_cut[features_use[j]])]
+        }
+      )
+    )
+    names(
+      sample(
+        ctrl_use,
+        size = min(ctrl * length(features_use), length(ctrl_use)),
+        replace = FALSE
+      )
+    )
+  })
+
+  feature_idx <- lapply(features, function(x) {
+    idx <- match(x, rownames(expr_data))
+    as.integer(idx[!is.na(idx)])
+  })
+  control_idx <- lapply(control_sets, function(x) {
+    idx <- match(x, rownames(expr_data))
+    as.integer(idx[!is.na(idx)])
+  })
+
+  scores <- module_score_sparse(
+    expr = expr_data,
+    feature_sets = feature_idx,
+    control_sets = control_idx,
+    n_threads = scop_n_threads(cores)
+  )
+  dimnames(scores) <- list(colnames(expr_data), names(features))
+  scores
+}
+
+run_gsva_scores <- function(
+  expr_counts,
+  gene_sets,
+  kcdf = c("Poisson", "Gaussian", "none"),
+  min_gs_size = 10,
+  max_gs_size = 500,
+  max_diff = TRUE,
+  abs_ranking = FALSE,
+  tau = 1,
+  chunk_size = NULL,
+  sparse = NULL,
+  kernel = c("auto", "delegated", "native"),
+  cores = NULL
+) {
+  kcdf <- match.arg(kcdf)
+  kernel <- match.arg(kernel)
+  sparse_input <- inherits(expr_counts, "sparseMatrix")
+  if (identical(kernel, "auto")) {
+    kernel <- if (
+      identical(kcdf, "Gaussian") &&
+        (isTRUE(sparse) || (is.null(sparse) && sparse_input))
+    ) {
+      "native"
+    } else {
+      "delegated"
+    }
+  }
+
+  expr_counts <- gene_set_scoring_to_dgC(expr_counts)
+  expr_counts <- gene_set_scoring_drop_stored_zeros(expr_counts)
+  keep_features <- Matrix::rowSums(expr_counts) > 0
+  expr_counts <- expr_counts[keep_features, , drop = FALSE]
+  if (nrow(expr_counts) > 0L && inherits(expr_counts, "dgCMatrix")) {
+    nz_by_row <- split(
+      expr_counts@x,
+      factor(expr_counts@i, levels = seq_len(nrow(expr_counts)) - 1L)
+    )
+    nz_min <- vapply(nz_by_row, function(v) {
+      if (length(v)) min(v) else NA_real_
+    }, numeric(1))
+    nz_max <- vapply(nz_by_row, function(v) {
+      if (length(v)) max(v) else NA_real_
+    }, numeric(1))
+    constant_nz <- nz_min == nz_max & !is.na(nz_min)
+    if (any(constant_nz)) {
+      expr_counts <- expr_counts[!constant_nz, , drop = FALSE]
+    }
+  }
+  gene_set_idx <- gene_set_scoring_indices(
+    gene_sets = gene_sets,
+    feature_names = rownames(expr_counts)
+  )
+  gs_size <- lengths(gene_set_idx)
+  gene_set_idx <- gene_set_idx[
+    gs_size >= min_gs_size & gs_size <= max_gs_size
+  ]
+  if (length(gene_set_idx) == 0L) {
+    log_message(
+      "No gene sets remain after intersecting with the expression matrix",
+      message_type = "error"
+    )
+  }
+  chunk_size <- gene_set_scoring_normalize_chunk_size(
+    chunk_size = chunk_size,
+    n_genes = nrow(expr_counts),
+    n_cells = ncol(expr_counts)
+  )
+
+  if (identical(kernel, "native")) {
+    if (!identical(kcdf, "Gaussian")) {
+      log_message(
+        "{.arg kernel = 'native'} currently supports {.arg kcdf = 'Gaussian'} only",
+        message_type = "error"
+      )
+    }
+    scores <- gsva_gaussian_dense(
+      expr = expr_counts,
+      gene_sets = gene_set_idx,
+      max_diff = max_diff,
+      abs_ranking = abs_ranking,
+      tau = tau,
+      chunk_size = chunk_size,
+      n_threads = scop_n_threads(cores),
+      legacy_zero_walk = gsva_uses_legacy_sparse_walk()
+    )
+    dimnames(scores) <- list(colnames(expr_counts), names(gene_set_idx))
+    return(scores)
+  }
+
+  check_r("GSVA", verbose = FALSE)
+  gene_sets_exact <- lapply(gene_set_idx, function(idx) {
+    rownames(expr_counts)[idx]
+  })
+  param_args <- list(
+    exprData = expr_counts,
+    geneSets = gene_sets_exact,
+    minSize = min_gs_size,
+    maxSize = max_gs_size,
+    kcdf = kcdf,
+    tau = tau,
+    maxDiff = max_diff,
+    absRanking = abs_ranking
+  )
+  if (!is.null(sparse)) {
+    param_args$sparse <- sparse
+  }
+  param <- do.call(GSVA::gsvaParam, param_args)
+  ranks <- GSVA::gsvaRanks(
+    param = param,
+    verbose = FALSE
+  )
+  scores <- GSVA::gsvaScores(
+    param = ranks,
+    verbose = FALSE
+  )
+  if (inherits(scores, "SummarizedExperiment")) {
+    scores <- SummarizedExperiment::assay(scores)
+  }
+  if (!is.matrix(scores)) {
+    scores <- as.matrix(scores)
+  }
+  score_terms <- rownames(scores)
+  if (is.null(score_terms)) {
+    score_terms <- names(gene_set_idx)[seq_len(nrow(scores))]
+  }
+  scores <- Matrix::t(scores)
+  dimnames(scores) <- list(colnames(expr_counts), score_terms)
+  scores
+}
+
+run_ssgsea_scores <- function(
+  expr_counts,
+  gene_sets,
+  min_gs_size = 10,
+  max_gs_size = 500,
+  alpha = 0.25,
+  normalize = TRUE
+) {
+  expr_counts <- gene_set_scoring_to_dgC(expr_counts)
+  keep_features <- Matrix::rowSums(expr_counts) > 0
+  expr_counts <- expr_counts[keep_features, , drop = FALSE]
+  gene_set_idx <- gene_set_scoring_indices(
+    gene_sets = gene_sets,
+    feature_names = rownames(expr_counts)
+  )
+  gs_size <- lengths(gene_set_idx)
+  gene_set_idx <- gene_set_idx[
+    gs_size >= min_gs_size & gs_size <= max_gs_size
+  ]
+  if (length(gene_set_idx) == 0L) {
+    log_message(
+      "No gene sets remain after intersecting with the expression matrix",
+      message_type = "error"
+    )
+  }
+
+  scores <- ssgsea_rank_dense(
+    expr = expr_counts,
+    gene_sets = gene_set_idx,
+    alpha = alpha,
+    normalize = normalize
+  )
+  dimnames(scores) <- list(colnames(expr_counts), names(gene_set_idx))
+  scores
+}
+
+run_zscore_scores <- function(
+  expr_counts,
+  gene_sets,
+  min_gs_size = 10,
+  max_gs_size = 500,
+  sparse_standardize = FALSE,
+  sparse_standardize_full = FALSE
+) {
+  expr_counts <- gene_set_scoring_to_dgC(expr_counts)
+  keep_features <- Matrix::rowSums(expr_counts) > 0
+  expr_counts <- expr_counts[keep_features, , drop = FALSE]
+  gene_set_idx <- gene_set_scoring_indices(
+    gene_sets = gene_sets,
+    feature_names = rownames(expr_counts)
+  )
+  gs_size <- lengths(gene_set_idx)
+  gene_set_idx <- gene_set_idx[
+    gs_size >= min_gs_size & gs_size <= max_gs_size
+  ]
+  if (length(gene_set_idx) == 0L) {
+    log_message(
+      "No gene sets remain after intersecting with the expression matrix",
+      message_type = "error"
+    )
+  }
+  subset <- gene_set_scoring_subset_to_index_union(expr_counts, gene_set_idx)
+  expr_counts <- subset$expr
+  gene_set_idx <- subset$gene_sets
+
+  max_size <- if (is.finite(max_gs_size)) {
+    as.integer(max_gs_size)
+  } else {
+    .Machine$integer.max
+  }
+  scores <- zscore_dense(
+    expr = expr_counts,
+    gene_sets = gene_set_idx,
+    min_size = as.integer(min_gs_size),
+    max_size = max_size,
+    sparse_standardize = sparse_standardize,
+    sparse_standardize_full = sparse_standardize_full
+  )
+  dimnames(scores) <- list(colnames(expr_counts), names(gene_set_idx))
+  gene_set_scoring_drop_invalid_score_sets(scores)
+}
+
+run_plage_scores <- function(
+  expr_counts,
+  gene_sets,
+  min_gs_size = 10,
+  max_gs_size = 500,
+  dense_standardize = FALSE
+) {
+  expr_counts <- gene_set_scoring_to_dgC(expr_counts)
+  keep_features <- Matrix::rowSums(expr_counts) > 0
+  expr_counts <- expr_counts[keep_features, , drop = FALSE]
+  gene_set_idx <- gene_set_scoring_indices(
+    gene_sets = gene_sets,
+    feature_names = rownames(expr_counts)
+  )
+  gs_size <- lengths(gene_set_idx)
+  gene_set_idx <- gene_set_idx[
+    gs_size >= min_gs_size & gs_size <= max_gs_size
+  ]
+  if (length(gene_set_idx) == 0L) {
+    log_message(
+      "No gene sets remain after intersecting with the expression matrix",
+      message_type = "error"
+    )
+  }
+  subset <- gene_set_scoring_subset_to_index_union(expr_counts, gene_set_idx)
+  expr_counts <- subset$expr
+  gene_set_idx <- subset$gene_sets
+
+  max_size <- if (is.finite(max_gs_size)) {
+    as.integer(max_gs_size)
+  } else {
+    .Machine$integer.max
+  }
+  scores <- plage_dense(
+    expr = expr_counts,
+    gene_sets = gene_set_idx,
+    min_size = as.integer(min_gs_size),
+    max_size = max_size,
+    dense_standardize = dense_standardize
+  )
+  dimnames(scores) <- list(colnames(expr_counts), names(gene_set_idx))
+  gene_set_scoring_drop_invalid_score_sets(scores)
+}
+
+
+orient_plage_scores <- function(scores, expr, gene_sets) {
+  if (is.null(scores) || length(gene_sets) == 0L) {
+    return(scores)
+  }
+  expr <- gene_set_scoring_to_dgC(expr)
+  if (!is.matrix(scores)) {
+    scores <- as_matrix(scores)
+  }
+  feature_names <- rownames(expr)
+  n_cells <- ncol(expr)
+  if (n_cells <= 1L) {
+    return(scores)
+  }
+
+  row_sum <- Matrix::rowSums(expr)
+  expr_sq <- expr
+  expr_sq@x <- expr_sq@x * expr_sq@x
+  row_sq_sum <- Matrix::rowSums(expr_sq)
+  row_mean <- row_sum / n_cells
+  row_var <- (row_sq_sum - n_cells * row_mean * row_mean) / (n_cells - 1L)
+  row_var[row_var < 0 & row_var > -1e-12] <- 0
+  row_sd <- sqrt(row_var)
+  valid_rows <- is.finite(row_sd) & row_sd > 0
+
+  for (set_name in intersect(rownames(scores), names(gene_sets))) {
+    idx <- match(gene_sets[[set_name]], feature_names)
+    idx <- unique(idx[!is.na(idx)])
+    idx <- idx[valid_rows[idx]]
+    if (length(idx) == 0L) {
+      next
+    }
+    inv_sd <- 1 / row_sd[idx]
+    ref <- rep(sum(-row_mean[idx] * inv_sd), n_cells)
+    ref <- ref +
+      as.numeric(Matrix::colSums(
+        Matrix::Diagonal(x = inv_sd) %*% expr[idx, , drop = FALSE]
+      ))
+    ref <- ref / length(idx)
+    score <- as.numeric(scores[set_name, ])
+    dot <- sum(score * ref, na.rm = TRUE)
+    if (is.finite(dot) && dot < 0) {
+      scores[set_name, ] <- -scores[set_name, ]
+    }
+  }
+  scores
+}
+
+run_vision_scores <- function(
+  expr_counts,
+  gene_sets,
+  scale_by_library = FALSE,
+  sig_gene_importance = FALSE
+) {
+  check_r("YosefLab/VISION", verbose = FALSE)
+  Vision_fun <- get_namespace_fun("VISION", "Vision")
+  calc_signature_scores_fun <- get_namespace_fun(
+    "VISION",
+    "calcSignatureScores"
+  )
+  create_gene_signature_fun <- get_namespace_fun(
+    "VISION",
+    "createGeneSignature"
+  )
+
+  expr_mat <- as_matrix(expr_counts)
+  if (isTRUE(scale_by_library)) {
+    n_umi <- Matrix::colSums(expr_counts)
+    expr_mat <- Matrix::t(Matrix::t(expr_mat) / n_umi) * stats::median(n_umi)
+  }
+
+  signatures <- lapply(gene_sets, function(gs) {
+    intersect(gs, rownames(expr_mat))
+  })
+  signatures <- signatures[lengths(signatures) > 0L]
+  if (length(signatures) == 0L) {
+    log_message(
+      "No gene sets retain genes after intersecting with the expression matrix",
+      message_type = "error"
+    )
+  }
+
+  signatures <- Map(
+    function(sig_name, sig_genes) {
+      create_gene_signature_fun(
+        sig_name,
+        stats::setNames(rep(1, length(sig_genes)), sig_genes)
+      )
+    },
+    names(signatures),
+    signatures
+  )
+
+  vis <- Vision_fun(
+    expr_mat,
+    signatures = signatures,
+    projection_methods = character()
+  )
+  vis <- calc_signature_scores_fun(
+    vis,
+    sig_gene_importance = sig_gene_importance
+  )
+  as_matrix(vis@SigScores)
+}
+
+gsva_standardize <- function() {
+  if (!isTRUE(all(unlist(check_r("GSVA", install = FALSE, verbose = FALSE), use.names = FALSE)))) {
+    return(TRUE)
+  }
+  utils::packageVersion("GSVA") >= "2.6.0"
+}
+
+gsva_uses_legacy_sparse_walk <- function() {
+  if (!isTRUE(all(unlist(check_r("GSVA", install = FALSE, verbose = FALSE), use.names = FALSE)))) {
+    return(FALSE)
+  }
+  utils::packageVersion("GSVA") < "2.6.0"
+}

@@ -1,0 +1,13 @@
+.Rproj.user
+.Rhistory
+.RData
+.eslintrc.json
+inst/doc
+src/*.o
+src/*.so
+src-x64/*
+src-i386/*
+*RcppExports*
+inst/html_output/thirdparty/*
+*.build.timestamp
+docs

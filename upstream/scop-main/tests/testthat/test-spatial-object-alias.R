@@ -1,0 +1,188 @@
+make_spatial_object_alias_fixture <- function() {
+  counts <- matrix(
+    c(
+      5, 4, 0, 1, 5, 4, 0, 1, 5,
+      0, 1, 4, 5, 0, 1, 4, 5, 0,
+      1, 1, 1, 1, 1, 1, 1, 1, 1,
+      3, 0, 3, 0, 3, 0, 3, 0, 3
+    ),
+    nrow = 4,
+    byrow = TRUE,
+    dimnames = list(
+      paste0("Gene", 1:4),
+      paste0("Spot", 1:9)
+    )
+  )
+  srt <- suppressWarnings(Seurat::CreateSeuratObject(counts = counts))
+  srt$x <- rep(1:3, 3)
+  srt$y <- rep(1:3, each = 3)
+  srt
+}
+
+test_that("native spatial APIs take the Seurat object as object", {
+  skip_if_not_installed("BiocNeighbors")
+  srt <- make_spatial_object_alias_fixture()
+
+  qc <- suppressWarnings(RunSpotQC(
+    object = srt,
+    assay = "RNA",
+    qc_metrics = c("umi", "gene"),
+    UMI_threshold = 0,
+    gene_threshold = 0,
+    verbose = FALSE
+  ))
+  expect_s4_class(qc, "Seurat")
+  qc_positional <- suppressWarnings(RunSpotQC(
+    srt,
+    assay = "RNA",
+    qc_metrics = c("umi", "gene"),
+    UMI_threshold = 0,
+    gene_threshold = 0,
+    verbose = FALSE
+  ))
+  expect_identical(qc_positional$SpotQC, qc$SpotQC)
+  expect_s3_class(
+    SpatialSpotPlot(
+      object = qc,
+      group.by = "SpotQC",
+      overlay_image = FALSE,
+      theme_use = NULL
+    ),
+    "ggplot"
+  )
+
+  network <- RunSpatialNetwork(
+    object = qc,
+    k = 1,
+    verbose = FALSE
+  )
+  expect_s4_class(network, "Seurat")
+  expect_s3_class(
+    SpatialNetworkPlot(
+      object = network,
+      graph.name = "knn_k1",
+      theme_use = NULL
+    ),
+    "ggplot"
+  )
+
+  svf <- RunSpatialVariableFeatures(
+    object = network,
+    assay = "RNA",
+    layer = "counts",
+    method = "moran",
+    backend = "r",
+    coord.cols = c("x", "y"),
+    nfeatures = 2,
+    min_spots = 1,
+    verbose = FALSE
+  )
+  expect_s4_class(svf, "Seurat")
+  expect_s3_class(
+    SpatialVariableFeaturePlot(
+      object = svf,
+      plot_type = "summary",
+      theme_use = NULL
+    ),
+    "ggplot"
+  )
+})
+
+test_that("srt remains a deprecated alias for object", {
+  skip_if_not_installed("BiocNeighbors")
+  srt <- make_spatial_object_alias_fixture()
+
+  expect_warning(
+    qc <- RunSpotQC(
+      srt = srt,
+      assay = "RNA",
+      qc_metrics = c("umi", "gene"),
+      UMI_threshold = 0,
+      gene_threshold = 0,
+      verbose = FALSE
+    ),
+    class = "deprecatedWarning"
+  )
+  expect_s4_class(qc, "Seurat")
+  plot <- NULL
+  expect_warning(
+    plot <- SpatialSpotPlot(
+      srt = qc,
+      group.by = "SpotQC",
+      overlay_image = FALSE,
+      theme_use = NULL
+    ),
+    "`srt` is deprecated"
+  )
+  expect_s3_class(plot, "ggplot")
+
+  expect_warning(
+    network <- RunSpatialNetwork(
+      srt = qc,
+      k = 1,
+      verbose = FALSE
+    ),
+    class = "deprecatedWarning"
+  )
+  expect_warning(
+    svf <- RunSpatialVariableFeatures(
+      srt = network,
+      assay = "RNA",
+      layer = "counts",
+      method = "moran",
+      backend = "r",
+      coord.cols = c("x", "y"),
+      nfeatures = 2,
+      min_spots = 1,
+      verbose = FALSE
+    ),
+    class = "deprecatedWarning"
+  )
+  expect_warning(
+    svf_plot <- SpatialVariableFeaturePlot(
+      srt = svf,
+      plot_type = "summary",
+      theme_use = NULL
+    ),
+    class = "deprecatedWarning"
+  )
+  expect_s3_class(svf_plot, "ggplot")
+})
+
+test_that("spatial object input rejects ambiguous or missing input", {
+  srt <- make_spatial_object_alias_fixture()
+  expect_error(
+    RunSpotQC(srt = srt, object = srt, verbose = FALSE),
+    "only one of.*object.*srt"
+  )
+  expect_error(
+    SpatialSpotPlot(verbose = FALSE),
+    "through.*object.*srt"
+  )
+  expect_error(
+    RunSpatialNetwork(object = list(), verbose = FALSE),
+    "object.*Seurat"
+  )
+
+  calls_with_explicit_null_object <- list(
+    function() RunSpotQC(object = NULL, srt = srt, verbose = FALSE),
+    function() SpatialSpotPlot(object = NULL, srt = srt, verbose = FALSE),
+    function() RunSpatialNetwork(object = NULL, srt = srt, verbose = FALSE),
+    function() RunSpatialVariableFeatures(object = NULL, srt = srt, verbose = FALSE),
+    function() SpatialVariableFeaturePlot(object = NULL, srt = srt)
+  )
+  for (call in calls_with_explicit_null_object) {
+    expect_error(call(), "only one of.*object.*srt")
+  }
+
+  calls_without_object <- list(
+    function() RunSpotQC(verbose = FALSE),
+    function() SpatialSpotPlot(verbose = FALSE),
+    function() RunSpatialNetwork(verbose = FALSE),
+    function() RunSpatialVariableFeatures(verbose = FALSE),
+    function() SpatialVariableFeaturePlot()
+  )
+  for (call in calls_without_object) {
+    expect_error(call(), "object.*srt")
+  }
+})

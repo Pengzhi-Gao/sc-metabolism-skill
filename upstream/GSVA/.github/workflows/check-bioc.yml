@@ -1,0 +1,290 @@
+## Read more about GitHub actions the features of this GitHub Actions workflow
+## at https://lcolladotor.github.io/biocthis/articles/biocthis.html#use_bioc_github_action
+##
+## For more details, check the biocthis developer notes vignette at
+## https://lcolladotor.github.io/biocthis/articles/biocthis_dev_notes.html
+##
+## You can add this workflow to other packages using:
+## > biocthis::use_bioc_github_action()
+## or
+## > usethis::use_github_action("check-bioc", "https://bit.ly/biocthis_gha", "check-bioc.yml")
+## without having to install biocthis.
+##
+## Using GitHub Actions exposes you to many details about how R packages are
+## compiled and installed in several operating systems.
+## If you need help, please follow the steps listed at
+## https://github.com/r-lib/actions#where-to-find-help
+##
+## If you found an issue specific to biocthis's GHA workflow, please report it
+## with the information that will make it easier for others to help you.
+## Thank you!
+
+## Acronyms:
+## * GHA: GitHub Action
+## * OS: operating system
+
+on:
+  push:
+    branches:
+      - devel
+      - 'RELEASE_*'
+  pull_request:
+    branches:
+      - devel
+      - 'RELEASE_*'
+  schedule:
+    - cron: '0 6 * * 0'
+
+name: R-CMD-check-bioc
+
+## Cancel a run still in progress when a newer commit is pushed to the same
+## branch or pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+## These environment variables control whether to run GHA code later on that is
+## specific to testthat, covr, and pkgdown.
+##
+## If you need to clear the cache of packages, update the number inside
+## cache-version as discussed at https://github.com/r-lib/actions/issues/86.
+## Note that you can always run a GHA test without the cache by using the word
+## "/nocache" in the commit message.
+env:
+  has_testthat: 'false'
+  run_covr: 'true'
+  run_pkgdown: 'false'
+  has_RUnit: 'false'
+  cache-version: 'cache-v1'
+
+jobs:
+  ## This first job uses the GitHub repository branch name to infer what
+  ## version of Bioconductor we will be working on.
+  define-docker-info:
+    runs-on: ubuntu-latest
+    outputs:
+      imagename: ${{ steps.findinfo.outputs.imagename }}
+      biocversion: ${{ steps.findinfo.outputs.biocversion }}
+    steps:
+      - id: findinfo
+        run: |
+          ## Find what Bioconductor RELEASE branch we are working on
+          ## otherwise, assume we are working on bioc-devel. On pull requests,
+          ## GITHUB_REF is refs/pull/N/merge, so use the target branch instead.
+          ref="${GITHUB_BASE_REF:-$GITHUB_REF}"
+          if echo "$ref" | grep -q "RELEASE_"; then
+            biocversion="$(basename -- $ref | tr '[:lower:]' '[:upper:]')"
+          else
+            biocversion="devel"
+          fi
+          ## Define the image name and print the information
+          imagename="bioconductor/bioconductor_docker:${biocversion}"
+          echo $imagename
+          echo $biocversion
+
+          ## Save the information for the next job
+          echo "imagename=${imagename}" >> $GITHUB_OUTPUT
+          echo "biocversion=${biocversion}" >> $GITHUB_OUTPUT
+
+
+  R-CMD-check-bioc:
+    ## This job checks the R package using the Bioconductor docker that was
+    ## defined by the previous job. Vignettes are built by the job
+    ## build-vignettes and test coverage is computed by the job test-coverage,
+    ## which both run in parallel to this one.
+    runs-on: ubuntu-latest
+    needs: define-docker-info
+
+    ## Name shown on the GHA log
+    name: ubuntu-latest (r-biocdocker bioc-${{ needs.define-docker-info.outputs.biocversion }})
+
+    outputs:
+      rversion: ${{ steps.setup.outputs.rversion }}
+      biocversionnum: ${{ steps.setup.outputs.biocversionnum }}
+
+    ## Environment variables unique to this job.
+    env:
+      R_REMOTES_NO_ERRORS_FROM_WARNINGS: true
+      TZ: UTC
+      NOT_CRAN: true
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+    ## The docker container to use. Note that we link a directory on the GHA
+    ## runner to a docker directory, such that we can then cache the linked
+    ## directory. This directory will contain the R packages used.
+    container:
+      image: ${{ needs.define-docker-info.outputs.imagename }}
+      volumes:
+        - /home/runner/work/_temp/Library:/usr/local/lib/R/host-site-library
+    steps:
+      ## Most of these steps are the same as the ones in
+      ## https://github.com/r-lib/actions/blob/master/examples/check-standard.yaml
+      ## If they update their steps, we will also need to update ours.
+      - uses: actions/checkout@v6
+
+      - id: setup
+        name: Set up dependencies
+        uses: ./.github/actions/setup-bioc-deps
+        with:
+          biocversion: ${{ needs.define-docker-info.outputs.biocversion }}
+          cache-version: ${{ env.cache-version }}
+
+      - name: Session info
+        run: |
+          options(width=100)
+          pkgs <- installed.packages()[, "Package"]
+          sessioninfo::session_info(pkgs, include_base=TRUE)
+        shell: Rscript {0}
+
+      ## Vignettes are neither built nor checked here, see the job
+      ## build-vignettes below.
+      - name: Check
+        env:
+          _R_CHECK_CRAN_INCOMING_: false
+        run: |
+          rcmdcheck::rcmdcheck(
+              args = c("--ignore-vignettes", "--no-manual", "--timings"),
+              build_args = c("--no-build-vignettes", "--no-manual", "--no-resave-data"),
+              error_on = "error",
+              check_dir = "check"
+          )
+        shell: Rscript {0}
+
+      - name: Reveal testthat details
+        if:  env.has_testthat == 'true'
+        run: find . -name testthat.Rout -exec cat '{}' ';'
+
+      - name: Run RUnit tests
+        if:  env.has_RUnit == 'true'
+        run: |
+          ## Install BiocGenerics
+          BiocManager::install("BiocGenerics")
+          ## Install the package itself, otherwise BiocGenerics:::testPackage() doesn't find it
+          install.packages(".", repos=NULL)
+          BiocGenerics:::testPackage()
+        shell: Rscript {0}
+
+      - name: Install pkgdown
+        if: github.ref == 'refs/heads/devel' && env.run_pkgdown == 'true'
+        run: |
+          remotes::install_github("r-lib/pkgdown")
+        shell: Rscript {0}
+
+      - name: Install package
+        if: github.ref == 'refs/heads/devel' && env.run_pkgdown == 'true'
+        run: R CMD INSTALL .
+
+      - name: Deploy package
+        if: github.ref == 'refs/heads/devel' && env.run_pkgdown == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          Rscript -e "pkgdown::deploy_to_branch(new_process = FALSE)"
+        shell: bash {0}
+        ## Note that you need to run pkgdown::deploy_to_branch(new_process = FALSE)
+        ## at least one locally before this will work. This creates the gh-pages
+        ## branch (erasing anything you haven't version controlled!) and
+        ## makes the git history recognizable by pkgdown.
+
+      - name: Upload check results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ runner.os }}-biocdocker-biocbranch-${{ needs.define-docker-info.outputs.biocversion }}-r-${{ steps.setup.outputs.rversion }}-bioc-${{ steps.setup.outputs.biocversionnum }}-results
+          path: check
+
+  build-vignettes:
+    ## This job builds the package source tarball with its vignettes, which
+    ## runs the vignette code, in parallel to the job R-CMD-check-bioc.
+    runs-on: ubuntu-latest
+    needs: define-docker-info
+
+    name: vignettes (r-biocdocker bioc-${{ needs.define-docker-info.outputs.biocversion }})
+
+    env:
+      R_REMOTES_NO_ERRORS_FROM_WARNINGS: true
+      TZ: UTC
+      NOT_CRAN: true
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+    container:
+      image: ${{ needs.define-docker-info.outputs.imagename }}
+      volumes:
+        - /home/runner/work/_temp/Library:/usr/local/lib/R/host-site-library
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: setup
+        name: Set up dependencies
+        uses: ./.github/actions/setup-bioc-deps
+        with:
+          biocversion: ${{ needs.define-docker-info.outputs.biocversion }}
+          cache-version: ${{ env.cache-version }}
+
+      ## Data downloaded by the vignettes, through ExperimentHub and through
+      ## BiocFileCache (e.g., spatialLIBD::fetch_data()), is stored under the
+      ## temporary directory of the runner, whose path runner.temp is the same
+      ## for the actions/cache step and for R, which both run in the container.
+      ## Cached data is never checked against its online source, so the key
+      ## includes the Bioconductor version to download the data again at each
+      ## Bioconductor release. Update the number at the end of the key to
+      ## download the data again in between releases.
+      - name: Cache data downloaded by the vignettes
+        if: "!contains(github.event.head_commit.message, '/nocache')"
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/vignettedata
+          key: ${{ env.cache-version }}-${{ runner.os }}-vignettedata-bioc-${{ steps.setup.outputs.biocversionnum }}-v1
+
+      - name: Build package with vignettes
+        env:
+          EXPERIMENT_HUB_CACHE: ${{ runner.temp }}/vignettedata/ExperimentHub
+          BFC_CACHE: ${{ runner.temp }}/vignettedata/BiocFileCache
+        run: |
+          mkdir -p "$EXPERIMENT_HUB_CACHE" "$BFC_CACHE"
+          R CMD build --no-manual --no-resave-data .
+          du -sh "$EXPERIMENT_HUB_CACHE" "$BFC_CACHE"
+
+  test-coverage:
+    ## This job computes test coverage and uploads it to codecov, in parallel
+    ## to the job R-CMD-check-bioc. It only runs on the devel branch.
+    if: github.ref == 'refs/heads/devel'
+    runs-on: ubuntu-latest
+    needs: define-docker-info
+
+    name: coverage (r-biocdocker bioc-${{ needs.define-docker-info.outputs.biocversion }})
+
+    env:
+      R_REMOTES_NO_ERRORS_FROM_WARNINGS: true
+      TZ: UTC
+      NOT_CRAN: true
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+    container:
+      image: ${{ needs.define-docker-info.outputs.imagename }}
+      volumes:
+        - /home/runner/work/_temp/Library:/usr/local/lib/R/host-site-library
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up dependencies
+        if: env.run_covr == 'true'
+        uses: ./.github/actions/setup-bioc-deps
+        with:
+          biocversion: ${{ needs.define-docker-info.outputs.biocversion }}
+          cache-version: ${{ env.cache-version }}
+
+      - name: Install covr
+        if: env.run_covr == 'true'
+        run: |
+          remotes::install_cran("covr")
+        shell: Rscript {0}
+
+      - name: Test coverage
+        if: env.run_covr == 'true'
+        run: |
+          covr::codecov(token = "${{secrets.CODECOV_TOKEN}}")
+        shell: Rscript {0}

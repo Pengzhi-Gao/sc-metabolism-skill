@@ -1,0 +1,2725 @@
+#' @title Cell Dimensional Plot
+#'
+#' @description
+#' Color cells on a dimensionality reduction by metadata groups, with optional
+#' labels, marks, density, lineages, PAGA, and RNA velocity layers.
+#'
+#' @md
+#' @inheritParams scop-params
+#' @param group.by Metadata column(s) used to color cells.
+#' @param label.by Metadata column for labels. `NULL` uses `group.by`.
+#' @param mark.by Metadata column for marks. `NULL` uses `legend.by` (nested
+#' legend) or `group.by`.
+#' @param legend.by Parent group for a nested legend. `NULL` uses a standard legend.
+#' @param reduction Reduction to plot. `NULL` uses [DefaultReduction].
+#' @param split.by Metadata column to facet by.
+#' @param palette,palcolor Palette name ([thisplot::show_palettes]) or custom colors.
+#' @param bg_color Color for background / `NA` points.
+#' @param pt.size,pt.alpha Point size and transparency. `pt.size = NULL` scales
+#' with `sqrt(n)` (minimum `0.3`). Rasterized points keep at least a two-pixel
+#' radius at `raster.dpi = c(512, 512)` and scale with `raster.dpi`.
+#' @param cells.highlight,cols.highlight,sizes.highlight,alpha.highlight,stroke.highlight
+#' Cells to highlight and their appearance. `TRUE` highlights all cells.
+#' @param legend.position,legend.direction,legend.title Legend placement
+#' (`"none"`, `"left"`, `"right"`, `"bottom"`, `"top"`), direction, and title.
+#' `legend.title = NULL` uses the group name.
+#' @param combine,nrow,ncol,byrow Combine plots with [patchwork]. `combine = FALSE`
+#' returns a list of ggplots.
+#' @param dims Length-2 vector of dimensions to plot.
+#' @param show_na If `TRUE`, color `NA` groups with `bg_color`; if `FALSE`, drop them.
+#' @param show_stat Show cell-count statistics on the plot.
+#' @param label,label_insitu,label.size,label.fg,label.bg,label.bg.r
+#' Group labels. `label_insitu = FALSE` uses numbers instead of group names.
+#' @param label_repel,label_repulsion,label_point_size,label_point_color,label_segment_color
+#' Repel labels away from cluster centers.
+#' @param add_density,density_color,density_filled,density_filled_palette,density_filled_palcolor
+#' Density contours; `density_filled` draws filled bands.
+#' @param add_mark,mark_type,mark_expand,mark_alpha,mark_linetype,mark_linewidth,mark_border
+#' Marks around groups. `mark_type` is `"hull"`, `"ellipse"`, `"rect"`, or `"circle"`.
+#' `mark_border = NULL` uses group colors.
+#' @param mark_palette,mark_palcolor Palette for `mark.by` groups and nested-legend headers.
+#' @param add_grid,grid_n,grid_color,grid_size,grid_alpha Background point grid
+#' (useful for atlas-style blank axes).
+#' @param lineages,lineages_trim,lineages_span,lineages_palette,lineages_palcolor,lineages_arrow,lineages_linewidth,lineages_line_bg,lineages_line_bg_stroke,lineages_whiskers,lineages_whiskers_linewidth,lineages_whiskers_alpha
+#' Pseudotime lineages as [stats::loess] curves. See [grid::arrow] for `lineages_arrow`.
+#' @param stat.by,stat_type,stat_plot_type,stat_plot_size,stat_plot_palette,stat_palcolor,stat_plot_position,stat_plot_alpha,stat_plot_label,stat_plot_label_size
+#' Inset composition plot. `stat_type` is `"percent"` or `"count"`.
+#' @param graph,edge_size,edge_alpha,edge_color Neighbor-graph edges.
+#' @param paga,paga_type,paga_node_size,paga_edge_threshold,paga_edge_size,paga_edge_color,paga_edge_alpha,paga_show_transition,paga_transition_threshold,paga_transition_size,paga_transition_color,paga_transition_alpha
+#' PAGA graph layer. `paga_type` is `"connectivities"` or `"connectivities_tree"`.
+#' @param velocity,velocity_plot_type,velocity_n_neighbors,velocity_density,velocity_smooth,velocity_scale,velocity_min_mass,velocity_cutoff_perc,velocity_arrow_color,velocity_arrow_angle
+#' RNA velocity layer.
+#' @param streamline_L,streamline_minL,streamline_res,streamline_n,streamline_width,streamline_alpha,streamline_color,streamline_palette,streamline_palcolor,streamline_bg_color,streamline_bg_stroke
+#' Streamline appearance for velocity plots.
+#' @param hex,hex.count,hex.bins,hex.binwidth,hex.linewidth Hexagonal bins instead of points.
+#' @param raster,raster.dpi Rasterize points. `raster = NULL` rasterizes when
+#' there are more than 100,000 cells.
+#' @param theme_use,theme_args Theme name or function, plus extra theme arguments.
+#' @param aspect.ratio Panel aspect ratio.
+#' @param title,subtitle,xlab,ylab Plot labels.
+#' @param force Draw even when a grouping has more than 100 levels.
+#' @param cells Cell names to include.
+#'
+#' @return A `ggplot`, `patchwork`, or list of `ggplot` objects.
+#'
+#' @seealso
+#' [CellDimPlot3D], [FeatureDimPlot], [FeatureDimPlot3D]
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' p1 <- CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP"
+#' )
+#' p1
+#'
+#' thisplot::panel_fix(
+#'   p1,
+#'   height = 2,
+#'   raster = TRUE,
+#'   dpi = 300
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   theme_use = "theme_blank"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   theme_use = ggplot2::theme_classic,
+#'   theme_args = list(base_size = 16)
+#' )
+#'
+#' # Highlight cells
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   cells.highlight = colnames(
+#'     pancreas_sub
+#'   )[pancreas_sub$SubCellType == "Epsilon"]
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   split.by = "Phase",
+#'   reduction = "UMAP",
+#'   cells.highlight = TRUE,
+#'   theme_use = "theme_blank",
+#'   legend.position = "none"
+#' )
+#'
+#' # Add group labels
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   label = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   label = TRUE,
+#'   label.fg = "orange",
+#'   label.bg = "red",
+#'   label.size = 5
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   label = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   label = TRUE,
+#'   label_repel = TRUE,
+#'   label_segment_color = "red"
+#' )
+#'
+#' # Add various shape of marks
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_mark = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_mark = TRUE,
+#'   mark_expand = grid::unit(1, "mm")
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_mark = TRUE,
+#'   mark_alpha = 0.3
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_mark = TRUE,
+#'   mark_linetype = 2
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_mark = TRUE,
+#'   mark_type = "ellipse"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_mark = TRUE,
+#'   mark_type = "rect"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_mark = TRUE,
+#'   mark_type = "circle"
+#' )
+#'
+#' # Add a density layer
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_density = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_density = TRUE,
+#'   density_filled = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   add_density = TRUE,
+#'   density_filled = TRUE,
+#'   density_filled_palette = "Blues",
+#'   cells.highlight = TRUE
+#' )
+#'
+#' # Add statistical charts
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   stat.by = "Phase"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   stat.by = "Phase",
+#'   stat_plot_type = "ring",
+#'   stat_plot_label = TRUE,
+#'   stat_plot_size = 0.15
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   stat.by = "Phase",
+#'   stat_plot_type = "bar",
+#'   stat_type = "count",
+#'   stat_plot_position = "dodge"
+#' )
+#'
+#' # Chane the plot type from point to the hexagonal bin
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   hex = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   hex = TRUE,
+#'   hex.bins = 20
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   hex = TRUE,
+#'   hex.count = FALSE
+#' )
+#'
+#' # Show neighbors graphs on the plot
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   graph = "Standardpca_SNN"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "UMAP",
+#'   graph = "Standardpca_SNN",
+#'   edge_color = "grey80"
+#' )
+#'
+#' # Show lineages based on the pseudotime
+#' pancreas_sub <- RunSlingshot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   show_plot = FALSE
+#' )
+#'
+#' FeatureDimPlot(
+#'   pancreas_sub,
+#'   features = paste0("Lineage", 1:2),
+#'   reduction = "UMAP"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   lineages = paste0("Lineage", 1:2)
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   lineages = paste0("Lineage", 1:2),
+#'   lineages_whiskers = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   lineages = paste0("Lineage", 1:2),
+#'   lineages_span = 0.1
+#' )
+#'
+#' # Show PAGA results on the plot
+#' pancreas_sub <- RunPAGA(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   linear_reduction = "PCA",
+#'   nonlinear_reduction = "UMAP",
+#'   backend = "cpp",
+#'   return_seurat = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   paga = pancreas_sub@tools[["PAGA"]]
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   paga = pancreas_sub@tools[["PAGA"]],
+#'   paga_type = "connectivities_tree"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   pt.size = 5,
+#'   pt.alpha = 0.2,
+#'   label = TRUE,
+#'   label_repel = TRUE,
+#'   label_segment_color = "transparent",
+#'   paga = pancreas_sub@tools[["PAGA"]],
+#'   paga_edge_threshold = 0.1,
+#'   paga_edge_color = "black",
+#'   paga_edge_alpha = 1,
+#'   legend.position = "none",
+#'   theme_use = "theme_blank"
+#' )
+#'
+#' # Show RNA velocity results on the plot
+#' pancreas_sub <- RunSCVELO(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   linear_reduction = "PCA",
+#'   nonlinear_reduction = "UMAP",
+#'   mode = "stochastic",
+#'   backend = "cpp",
+#'   show_plot = FALSE,
+#'   return_seurat = TRUE
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   velocity = "stochastic"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   pt.size = 5,
+#'   pt.alpha = 0.2,
+#'   velocity = "stochastic",
+#'   velocity_plot_type = "grid"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   pt.size = 5,
+#'   pt.alpha = 0.2,
+#'   velocity = "stochastic",
+#'   velocity_plot_type = "grid",
+#'   velocity_scale = 1.5
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   pt.size = 5,
+#'   pt.alpha = 0.2,
+#'   velocity = "stochastic",
+#'   velocity_plot_type = "stream"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   pt.size = 5,
+#'   pt.alpha = 0.2,
+#'   label = TRUE,
+#'   velocity = "stochastic",
+#'   velocity_plot_type = "stream",
+#'   velocity_arrow_color = "yellow",
+#'   velocity_density = 2,
+#'   velocity_smooth = 1,
+#'   streamline_n = 20,
+#'   streamline_color = "black",
+#'   legend.position = "none",
+#'   theme_use = "theme_blank"
+#' )
+CellDimPlot <- function(
+  object,
+  group.by,
+  label.by = NULL,
+  mark.by = NULL,
+  legend.by = NULL,
+  reduction = NULL,
+  dims = c(1, 2),
+  split.by = NULL,
+  cells = NULL,
+  show_na = FALSE,
+  show_stat = ifelse(identical(theme_use, "theme_blank"), FALSE, TRUE),
+  pt.size = NULL,
+  pt.alpha = 1,
+  palette = "Chinese",
+  palcolor = NULL,
+  bg_color = "grey80",
+  label = FALSE,
+  label.size = 4,
+  label.fg = "white",
+  label.bg = "black",
+  label.bg.r = 0.1,
+  label_insitu = TRUE,
+  label_repel = FALSE,
+  label_repulsion = 20,
+  label_point_size = 1,
+  label_point_color = "black",
+  label_segment_color = "black",
+  cells.highlight = NULL,
+  cols.highlight = "black",
+  sizes.highlight = 1,
+  alpha.highlight = 1,
+  stroke.highlight = 0.5,
+  add_density = FALSE,
+  density_color = "grey80",
+  density_filled = FALSE,
+  density_filled_palette = "Greys",
+  density_filled_palcolor = NULL,
+  add_mark = FALSE,
+  mark_type = c("hull", "ellipse", "rect", "circle"),
+  mark_expand = grid::unit(3, "mm"),
+  mark_alpha = 0.1,
+  mark_linetype = 1,
+  mark_linewidth = 0.5,
+  mark_border = NULL,
+  mark_palette = palette,
+  mark_palcolor = NULL,
+  add_grid = FALSE,
+  grid_n = 12,
+  grid_color = "black",
+  grid_size = 0.25,
+  grid_alpha = 0.35,
+  lineages = NULL,
+  lineages_trim = c(0.01, 0.99),
+  lineages_span = 0.75,
+  lineages_palette = "Dark2",
+  lineages_palcolor = NULL,
+  lineages_arrow = grid::arrow(length = grid::unit(0.1, "inches")),
+  lineages_linewidth = 1,
+  lineages_line_bg = "white",
+  lineages_line_bg_stroke = 0.5,
+  lineages_whiskers = FALSE,
+  lineages_whiskers_linewidth = 0.5,
+  lineages_whiskers_alpha = 0.5,
+  stat.by = NULL,
+  stat_type = "percent",
+  stat_plot_type = "pie",
+  stat_plot_position = c("stack", "dodge"),
+  stat_plot_size = 0.2,
+  stat_plot_palette = "Set1",
+  stat_palcolor = NULL,
+  stat_plot_alpha = 1,
+  stat_plot_label = FALSE,
+  stat_plot_label_size = 3,
+  graph = NULL,
+  edge_size = c(0.05, 0.5),
+  edge_alpha = 0.1,
+  edge_color = "grey40",
+  paga = NULL,
+  paga_type = "connectivities",
+  paga_node_size = 4,
+  paga_edge_threshold = 0.01,
+  paga_edge_size = c(0.2, 1),
+  paga_edge_color = "grey40",
+  paga_edge_alpha = 0.5,
+  paga_transition_threshold = 0.01,
+  paga_transition_size = c(0.2, 1),
+  paga_transition_color = "black",
+  paga_transition_alpha = 1,
+  paga_show_transition = FALSE,
+  velocity = NULL,
+  velocity_plot_type = "raw",
+  velocity_n_neighbors = ceiling(ncol(srt@assays[[1]]) / 50),
+  velocity_density = 1,
+  velocity_smooth = 0.5,
+  velocity_scale = 1,
+  velocity_min_mass = 1,
+  velocity_cutoff_perc = 5,
+  velocity_arrow_color = "black",
+  velocity_arrow_angle = 20,
+  streamline_L = 5,
+  streamline_minL = 1,
+  streamline_res = 1,
+  streamline_n = 15,
+  streamline_width = c(0, 0.8),
+  streamline_alpha = 1,
+  streamline_color = NULL,
+  streamline_palette = "RdYlBu",
+  streamline_palcolor = NULL,
+  streamline_bg_color = "white",
+  streamline_bg_stroke = 0.5,
+  hex = FALSE,
+  hex.linewidth = 0.5,
+  hex.count = TRUE,
+  hex.bins = 50,
+  hex.binwidth = NULL,
+  raster = NULL,
+  raster.dpi = c(512, 512),
+  aspect.ratio = 1,
+  title = NULL,
+  subtitle = NULL,
+  xlab = NULL,
+  ylab = NULL,
+  legend.position = "right",
+  legend.direction = "vertical",
+  legend.title = NULL,
+  theme_use = "theme_scop",
+  theme_args = list(),
+  combine = TRUE,
+  nrow = NULL,
+  ncol = NULL,
+  byrow = TRUE,
+  force = FALSE,
+  seed = 11,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  set.seed(seed)
+  mark_type <- match.arg(mark_type)
+  if (!is.null(label.by) && length(label.by) != 1L) {
+    log_message(
+      "{.arg label.by} must be a single meta.data column name",
+      message_type = "error"
+    )
+  }
+  if (!is.null(mark.by) && length(mark.by) != 1L) {
+    log_message(
+      "{.arg mark.by} must be a single meta.data column name",
+      message_type = "error"
+    )
+  }
+  if (!is.null(legend.by) && length(legend.by) != 1L) {
+    log_message(
+      "{.arg legend.by} must be a single meta.data column name",
+      message_type = "error"
+    )
+  }
+
+  check_r("ggnewscale", verbose = FALSE)
+  synthetic_split <- is.null(split.by)
+  if (isTRUE(synthetic_split)) {
+    split.by <- "All.groups"
+  }
+  meta_cols <- unique(c(group.by, label.by, mark.by, legend.by, split.by))
+  object_meta_cols <- if (isTRUE(synthetic_split)) {
+    setdiff(meta_cols, split.by)
+  } else {
+    meta_cols
+  }
+  for (i in object_meta_cols) {
+    if (!i %in% colnames(srt@meta.data)) {
+      log_message(
+        "{.val {i}} is not in the meta.data of srt object",
+        message_type = "error"
+      )
+    }
+  }
+  for (l in lineages) {
+    if (!l %in% colnames(srt@meta.data)) {
+      log_message(
+        "Lineage {.val {l}} is not in the meta.data of srt object",
+        message_type = "error"
+      )
+    }
+  }
+  if (!is.null(graph) && !graph %in% names(srt@graphs)) {
+    log_message(
+      "Graph {.val {graph}} is not exist in the srt object",
+      message_type = "error"
+    )
+  }
+  if (!is.null(graph)) {
+    graph <- srt@graphs[[graph]]
+  }
+  if (is.null(reduction)) {
+    reduction <- DefaultReduction(srt)
+  } else {
+    reduction <- DefaultReduction(srt, pattern = reduction)
+  }
+  if (!reduction %in% names(srt@reductions)) {
+    log_message(
+      "{.val {reduction}} is not in the srt reduction names",
+      message_type = "error"
+    )
+  }
+  if (!is.null(cells.highlight) && isFALSE(cells.highlight)) {
+    if (!any(cells.highlight %in% colnames(srt@assays[[1]]))) {
+      log_message(
+        "No cells in '{.arg cells.highlight}' found in srt",
+        message_type = "error"
+      )
+    }
+    if (!all(cells.highlight %in% colnames(srt@assays[[1]]))) {
+      log_message(
+        "Some cells in '{.arg cells.highlight}' not found in srt",
+        message_type = "warning",
+        verbose = verbose
+      )
+    }
+    cells.highlight <- intersect(cells.highlight, colnames(srt@assays[[1]]))
+  }
+
+  dat_meta <- srt@meta.data[, object_meta_cols, drop = FALSE]
+  if (isTRUE(synthetic_split)) {
+    dat_meta[[split.by]] <- factor(rep("", nrow(dat_meta)))
+  }
+  dat_meta <- dat_meta[, meta_cols, drop = FALSE]
+  for (i in meta_cols) {
+    if (!is.factor(dat_meta[[i]])) {
+      dat_meta[[i]] <- factor(
+        dat_meta[[i]],
+        levels = unique(dat_meta[[i]])
+      )
+    }
+    if (isTRUE(show_na) && any(is.na(dat_meta[[i]]))) {
+      raw_levels <- unique(c(levels(dat_meta[[i]]), "NA"))
+      dat_meta[[i]] <- as.character(dat_meta[[i]])
+      dat_meta[[i]][is.na(dat_meta[[i]])] <- "NA"
+      dat_meta[[i]] <- factor(dat_meta[[i]], levels = raw_levels)
+    }
+  }
+  nlev <- sapply(dat_meta, nlevels)
+  nlev <- nlev[nlev > 100]
+  if (length(nlev) > 0 && isFALSE(force)) {
+    log_message(
+      "The following variables have more than 100 levels: {.val {names(nlev)}}",
+      message_type = "warning",
+      verbose = verbose
+    )
+    if (interactive()) {
+      answer <- utils::askYesNo("Are you sure to continue?", default = FALSE)
+      if (isFALSE(answer)) {
+        return(invisible(NULL))
+      }
+    }
+  }
+
+  reduction_key <- srt@reductions[[reduction]]@key
+  dat_dim <- srt@reductions[[reduction]]@cell.embeddings
+  colnames(dat_dim) <- paste0(reduction_key, seq_len(ncol(dat_dim)))
+  rownames(dat_dim) <- rownames(dat_dim) %||% colnames(srt@assays[[1]])
+  dat_use <- cbind(dat_dim, dat_meta[row.names(dat_dim), , drop = FALSE])
+  if (!is.null(cells)) {
+    dat_use <- dat_use[intersect(rownames(dat_use), cells), , drop = FALSE]
+  }
+  point_config <- dim_plot_point_config(
+    n = nrow(dat_use),
+    pt.size = pt.size,
+    raster = raster,
+    raster.dpi = raster.dpi
+  )
+  pt.size <- point_config$pt.size
+  raster <- point_config$raster
+  raster_pt_size <- point_config$raster_pt_size
+  raster.dpi <- point_config$raster.dpi
+  if (isTRUE(raster)) {
+    check_r("scattermore", verbose = FALSE)
+  }
+  if (!is.null(stat.by)) {
+    srt_stat <- srt
+    if (isTRUE(synthetic_split)) {
+      srt_stat@meta.data[[split.by]] <- factor(rep("", ncol(srt_stat)))
+    }
+    subplots <- CellStatPlot(
+      srt_stat,
+      cells = cells,
+      stat.by = stat.by,
+      group.by = group.by,
+      split.by = split.by,
+      stat_type = stat_type,
+      plot_type = stat_plot_type,
+      position = stat_plot_position,
+      palette = stat_plot_palette,
+      palcolor = stat_palcolor,
+      alpha = stat_plot_alpha,
+      label = stat_plot_label,
+      label.size = stat_plot_label_size,
+      legend.position = "bottom",
+      legend.direction = legend.direction,
+      theme_use = theme_use,
+      theme_args = theme_args,
+      individual = TRUE,
+      combine = FALSE
+    )
+  }
+
+  if (!is.null(lineages)) {
+    lineages_layers <- LineagePlot(
+      srt,
+      cells = cells,
+      lineages = lineages,
+      reduction = reduction,
+      dims = dims,
+      trim = lineages_trim,
+      span = lineages_span,
+      palette = lineages_palette,
+      palcolor = lineages_palcolor,
+      lineages_arrow = lineages_arrow,
+      linewidth = lineages_linewidth,
+      line_bg = lineages_line_bg,
+      line_bg_stroke = lineages_line_bg_stroke,
+      whiskers = lineages_whiskers,
+      whiskers_linewidth = lineages_whiskers_linewidth,
+      whiskers_alpha = lineages_whiskers_alpha,
+      aspect.ratio = aspect.ratio,
+      title = title,
+      subtitle = subtitle,
+      xlab = xlab,
+      ylab = ylab,
+      legend.position = "bottom",
+      legend.direction = legend.direction,
+      theme_use = theme_use,
+      theme_args = theme_args,
+      return_layer = TRUE
+    )
+    lineages_layers <- lineages_layers[
+      !names(lineages_layers) %in% c("lab_layer", "theme_layer")
+    ]
+  }
+
+  if (!is.null(paga)) {
+    if (split.by != "All.groups") {
+      log_message(
+        "paga can only plot on the non-split data",
+        message_type = "error"
+      )
+    }
+    paga_layers <- PAGAPlot(
+      srt,
+      cells = cells,
+      paga = paga,
+      type = paga_type,
+      reduction = reduction,
+      dims = dims,
+      node_palette = palette,
+      node_palcolor = palcolor,
+      node_size = paga_node_size,
+      edge_threshold = paga_edge_threshold,
+      edge_size = paga_edge_size,
+      edge_color = paga_edge_color,
+      edge_alpha = paga_edge_alpha,
+      transition_threshold = paga_transition_threshold,
+      transition_size = paga_transition_size,
+      transition_color = paga_transition_color,
+      transition_alpha = paga_transition_alpha,
+      show_transition = paga_show_transition,
+      aspect.ratio = aspect.ratio,
+      title = title,
+      subtitle = subtitle,
+      xlab = xlab,
+      ylab = ylab,
+      legend.position = "bottom",
+      legend.direction = legend.direction,
+      theme_use = theme_use,
+      theme_args = theme_args,
+      return_layer = TRUE
+    )
+    paga_layers <- paga_layers[
+      !names(paga_layers) %in% c("lab_layer", "theme_layer")
+    ]
+  }
+
+  if (!is.null(velocity)) {
+    if (split.by != "All.groups") {
+      log_message(
+        "velocity can only plot on the non-split data",
+        message_type = "error"
+      )
+    }
+    velocity_layers <- VelocityPlot(
+      srt,
+      cells = cells,
+      reduction = reduction,
+      dims = dims,
+      velocity = velocity,
+      plot_type = velocity_plot_type,
+      group.by = group.by,
+      group_palette = palette,
+      group_palcolor = palcolor,
+      n_neighbors = velocity_n_neighbors,
+      density = velocity_density,
+      smooth = velocity_smooth,
+      scale = velocity_scale,
+      min_mass = velocity_min_mass,
+      cutoff_perc = velocity_cutoff_perc,
+      arrow_color = velocity_arrow_color,
+      arrow_angle = velocity_arrow_angle,
+      streamline_L = streamline_L,
+      streamline_minL = streamline_minL,
+      streamline_res = streamline_res,
+      streamline_n = streamline_n,
+      streamline_width = streamline_width,
+      streamline_alpha = streamline_alpha,
+      streamline_color = streamline_color,
+      streamline_palette = streamline_palette,
+      streamline_palcolor = streamline_palcolor,
+      streamline_bg_color = streamline_bg_color,
+      streamline_bg_stroke = streamline_bg_stroke,
+      aspect.ratio = aspect.ratio,
+      title = title,
+      subtitle = subtitle,
+      xlab = xlab,
+      ylab = ylab,
+      legend.position = "bottom",
+      legend.direction = legend.direction,
+      theme_use = theme_void,
+      theme_args = theme_args,
+      return_layer = TRUE
+    )
+    velocity_layers <- velocity_layers[
+      !names(velocity_layers) %in% c("lab_layer", "theme_layer")
+    ]
+  }
+
+  plist <- list()
+  xlab <- xlab %||% paste0(reduction_key, dims[1])
+  ylab <- ylab %||% paste0(reduction_key, dims[2])
+  if (identical(theme_use, "theme_blank")) {
+    theme_args[["xlab"]] <- xlab
+    theme_args[["ylab"]] <- ylab
+  }
+
+  comb <- expand.grid(
+    split = levels(dat_use[[split.by]]),
+    group = group.by,
+    stringsAsFactors = FALSE
+  )
+  rownames(comb) <- paste0(comb[["split"]], ":", comb[["group"]])
+  plist <- lapply(
+    stats::setNames(rownames(comb), rownames(comb)), function(i) {
+      g <- comb[i, "group"]
+      s <- comb[i, "split"]
+      legend_by_use <- legend.by
+      label_by_use <- label.by %||% g
+      mark_by_use <- mark.by %||% legend_by_use %||% g
+      colors <- cell_dim_palette_colors(
+        levels(dat_use[[g]]),
+        palette = palette,
+        palcolor = palcolor,
+        NA_keep = TRUE
+      )
+
+      dat <- dat_use
+      cells_mask <- dat[[split.by]] != s
+      dat[[g]][cells_mask] <- NA
+      if (isFALSE(show_na)) {
+        dat <- dat[!is.na(dat[[g]]), , drop = FALSE]
+      }
+      legend_list <- list()
+      labels_tb <- table(dat[[g]])
+      labels_tb <- labels_tb[labels_tb != 0]
+      cells_highlight_use <- cells.highlight
+      if (isTRUE(cells_highlight_use)) {
+        cells_highlight_use <- rownames(dat)[!is.na(dat[[g]])]
+      }
+
+      if (isTRUE(label_insitu)) {
+        if (isTRUE(show_stat)) {
+          label_use <- paste0(names(labels_tb), "(", labels_tb, ")")
+        } else {
+          label_use <- paste0(names(labels_tb))
+        }
+      } else {
+        if (isTRUE(label)) {
+          if (isTRUE(show_stat)) {
+            label_use <- paste0(
+              seq_along(labels_tb),
+              ": ",
+              names(labels_tb),
+              "(",
+              labels_tb,
+              ")"
+            )
+          } else {
+            label_use <- paste0(seq_along(labels_tb), ": ", names(labels_tb))
+          }
+        } else {
+          if (isTRUE(show_stat)) {
+            label_use <- paste0(names(labels_tb), "(", labels_tb, ")")
+          } else {
+            label_use <- paste0(names(labels_tb))
+          }
+        }
+      }
+
+      dat[["x"]] <- dat[[paste0(reduction_key, dims[1])]]
+      dat[["y"]] <- dat[[paste0(reduction_key, dims[2])]]
+      dat[["group.by"]] <- dat[[g]]
+      dat[["label.by"]] <- dat[[label_by_use]]
+      dat[["mark.by"]] <- dat[[mark_by_use]]
+      if (!is.null(legend_by_use)) {
+        dat[["legend.by"]] <- dat[[legend_by_use]]
+      }
+      dat[, "split.by"] <- s
+      dat <- dat[
+        order(dat[, "group.by"], decreasing = FALSE, na.last = FALSE), ,
+        drop = FALSE
+      ]
+      naindex <- which(is.na(dat[, "group.by"]))
+      naindex <- ifelse(length(naindex) > 0, max(naindex), 1)
+      dat <- dat[
+        c(1:naindex, sample((min(naindex + 1, nrow(dat))):nrow(dat))), ,
+        drop = FALSE
+      ]
+      if (isTRUE(show_stat)) {
+        subtitle_use <- subtitle %||%
+          paste0(s, " nCells:", sum(!is.na(dat[["group.by"]])))
+      } else {
+        subtitle_use <- subtitle
+      }
+
+      if (isTRUE(add_mark)) {
+        mark_fun <- switch(
+          EXPR = mark_type,
+          "ellipse" = "geom_mark_ellipse",
+          "hull" = "geom_mark_hull",
+          "rect" = "geom_mark_rect",
+          "circle" = "geom_mark_circle"
+        )
+        mark_mapping <- aes(
+          x = .data[["x"]],
+          y = .data[["y"]],
+          fill = .data[["mark.by"]]
+        )
+        mark_colors <- cell_dim_palette_colors(
+          levels(droplevels(dat[["mark.by"]])),
+          palette = mark_palette,
+          palcolor = mark_palcolor,
+          NA_keep = TRUE
+        )
+        mark_scales <- list(
+          scale_fill_manual(values = mark_colors),
+          ggnewscale::new_scale_fill()
+        )
+        if (is.null(mark_border)) {
+          mark_mapping <- aes(
+            x = .data[["x"]],
+            y = .data[["y"]],
+            color = .data[["mark.by"]],
+            fill = .data[["mark.by"]]
+          )
+          mark_scales <- c(
+            list(scale_color_manual(values = mark_colors)),
+            mark_scales,
+            list(ggnewscale::new_scale_color())
+          )
+        }
+        mark_args <- list(
+          data = dat[!is.na(dat[["mark.by"]]), , drop = FALSE],
+          mapping = mark_mapping,
+          expand = mark_expand,
+          alpha = mark_alpha,
+          linetype = mark_linetype,
+          linewidth = mark_linewidth,
+          con.size = mark_linewidth,
+          show.legend = FALSE,
+          inherit.aes = FALSE
+        )
+        if (!is.null(mark_border)) {
+          mark_args[["colour"]] <- mark_border
+        }
+        mark <- c(list(do.call(mark_fun, mark_args)), mark_scales)
+      } else {
+        mark <- NULL
+      }
+
+      net <- dim_plot_graph_layers(
+        graph = graph,
+        dat = dat,
+        edge_color = edge_color,
+        edge_alpha = edge_alpha,
+        edge_size = edge_size
+      )
+      density <- dim_plot_density_layers(
+        add_density = add_density,
+        density_filled = density_filled,
+        density_color = density_color,
+        density_filled_palette = density_filled_palette,
+        density_filled_palcolor = density_filled_palcolor,
+        line_show_legend = FALSE
+      )
+
+      grid_layer <- cell_dim_grid_layer(
+        dat = dat,
+        add_grid = add_grid,
+        grid_n = grid_n,
+        grid_color = grid_color,
+        grid_size = grid_size,
+        grid_alpha = grid_alpha
+      )
+
+      p <- ggplot(dat) +
+        grid_layer +
+        mark +
+        net +
+        density +
+        labs(title = title, subtitle = subtitle_use, x = xlab, y = ylab) +
+        scale_x_continuous(
+          limits = c(
+            min(dat_dim[, paste0(reduction_key, dims[1])], na.rm = TRUE),
+            max(dat_dim[, paste0(reduction_key, dims[1])], na.rm = TRUE)
+          )
+        ) +
+        scale_y_continuous(
+          limits = c(
+            min(dat_dim[, paste0(reduction_key, dims[2])], na.rm = TRUE),
+            max(dat_dim[, paste0(reduction_key, dims[2])], na.rm = TRUE)
+          )
+        ) +
+        apply_plot_theme(theme_use, theme_args) +
+        theme(
+          aspect.ratio = aspect.ratio,
+          legend.position = legend.position,
+          legend.direction = legend.direction
+        )
+
+      if (split.by != "All.groups") {
+        p <- p + facet_grid(. ~ split.by)
+      }
+
+      if (isTRUE(raster)) {
+        p <- p +
+          scattermore::geom_scattermore(
+            data = dat[is.na(dat[, "group.by"]), , drop = FALSE],
+            mapping = aes(x = .data[["x"]], y = .data[["y"]]),
+            color = bg_color,
+            pointsize = raster_pt_size,
+            alpha = pt.alpha,
+            pixels = raster.dpi
+          ) +
+          scattermore::geom_scattermore(
+            data = dat[!is.na(dat[, "group.by"]), , drop = FALSE],
+            mapping = aes(
+              x = .data[["x"]],
+              y = .data[["y"]],
+              color = .data[["group.by"]]
+            ),
+            pointsize = raster_pt_size,
+            alpha = pt.alpha,
+            pixels = raster.dpi
+          )
+      } else if (isTRUE(hex)) {
+        check_r("hexbin", verbose = FALSE)
+        if (isTRUE(hex.count)) {
+          p <- p +
+            geom_hex(
+              mapping = aes(
+                x = .data[["x"]],
+                y = .data[["y"]],
+                fill = .data[["group.by"]],
+                color = .data[["group.by"]],
+                alpha = after_stat(count)
+              ),
+              linewidth = hex.linewidth,
+              bins = hex.bins,
+              binwidth = hex.binwidth
+            )
+        } else {
+          p <- p +
+            geom_hex(
+              mapping = aes(
+                x = .data[["x"]],
+                y = .data[["y"]],
+                fill = .data[["group.by"]],
+                color = .data[["group.by"]]
+              ),
+              linewidth = hex.linewidth,
+              bins = hex.bins,
+              binwidth = hex.binwidth
+            )
+        }
+      } else {
+        p <- p +
+          geom_point(
+            mapping = aes(
+              x = .data[["x"]],
+              y = .data[["y"]],
+              color = .data[["group.by"]]
+            ),
+            shape = "circle",
+            size = pt.size,
+            stroke = 0,
+            alpha = pt.alpha
+          )
+      }
+
+      if (!is.null(cells_highlight_use) && isFALSE(hex)) {
+        cell_df <- subset(p$data, rownames(p$data) %in% cells_highlight_use)
+        if (nrow(cell_df) > 0) {
+          if (isTRUE(raster)) {
+            p <- p +
+              scattermore::geom_scattermore(
+                data = cell_df,
+                aes(x = .data[["x"]], y = .data[["y"]]),
+                color = cols.highlight,
+                pointsize = floor(sizes.highlight) + stroke.highlight,
+                alpha = alpha.highlight,
+                pixels = raster.dpi
+              ) +
+              scattermore::geom_scattermore(
+                data = cell_df,
+                aes(
+                  x = .data[["x"]],
+                  y = .data[["y"]],
+                  color = .data[["group.by"]]
+                ),
+                pointsize = floor(sizes.highlight),
+                alpha = alpha.highlight,
+                pixels = raster.dpi
+              )
+          } else {
+            p <- p +
+              geom_point(
+                data = cell_df,
+                aes(x = .data[["x"]], y = .data[["y"]]),
+                shape = "circle",
+                color = cols.highlight,
+                size = sizes.highlight + stroke.highlight,
+                alpha = alpha.highlight
+              ) +
+              geom_point(
+                data = cell_df,
+                aes(
+                  x = .data[["x"]],
+                  y = .data[["y"]],
+                  color = .data[["group.by"]]
+                ),
+                shape = "circle",
+                size = sizes.highlight,
+                alpha = alpha.highlight
+              )
+          }
+        }
+      }
+      legend_title_use <- if (is.null(legend.title)) paste0(g, ":") else legend.title
+      color_scale_guide <- if (is.null(legend.by)) "legend" else "none"
+      p <- p +
+        scale_color_manual(
+          name = legend_title_use,
+          values = colors[names(labels_tb)],
+          labels = label_use,
+          na.value = bg_color,
+          guide = color_scale_guide
+        )
+      if (isTRUE(hex)) {
+        fill_scale_guide <- if (is.null(legend.by)) "legend" else "none"
+        p <- p +
+          scale_fill_manual(
+            name = legend_title_use,
+            values = colors[names(labels_tb)],
+            labels = label_use,
+            na.value = bg_color,
+            guide = fill_scale_guide
+          )
+      }
+      if (is.null(legend.by)) {
+        p <- p +
+          guides(
+            color = guide_legend(
+              title.hjust = 0,
+              order = 1,
+              override.aes = list(shape = "circle", size = 4, alpha = 1)
+            )
+          )
+        if (isTRUE(hex)) {
+          p <- p +
+            guides(fill = guide_legend(title.hjust = 0, order = 1))
+        }
+      }
+      p_base <- p
+      nested_legend <- NULL
+      if (!is.null(legend.by)) {
+        nested_legend <- cell_dim_nested_legend_grob(
+          dat = dat[!is.na(dat[["group.by"]]) & !is.na(dat[["legend.by"]]), , drop = FALSE],
+          colors = colors[names(labels_tb)],
+          parent_colors = cell_dim_palette_colors(
+            levels(droplevels(dat[["legend.by"]])),
+            palette = mark_palette,
+            palcolor = mark_palcolor,
+            NA_keep = TRUE
+          ),
+          title = if (is.null(legend.title)) paste0(legend.by, ":") else legend.title,
+          legend_direction = legend.direction,
+          legend_position = legend.position
+        )
+      }
+
+      if (!is.null(stat.by)) {
+        coor_df <- stats::aggregate(
+          p$data[, c("x", "y")],
+          by = list(p$data[["group.by"]]),
+          FUN = stats::median
+        )
+        colnames(coor_df)[1] <- "group"
+        x_range <- diff(layer_scales(p)$x$range$range)
+        y_range <- diff(layer_scales(p)$y$range$range)
+        stat_plot <- subplots[paste0(g, ":", levels(dat[, "group.by"]), ":", s)]
+        names(stat_plot) <- levels(dat[, "group.by"])
+
+        stat_plot_list <- list()
+        for (i in seq_len(nrow(coor_df))) {
+          stat_plot_list[[i]] <- ggplot2::annotation_custom(
+            as_grob(
+              stat_plot[[coor_df[i, "group"]]] +
+                theme_void() +
+                theme(legend.position = "none")
+            ),
+            xmin = coor_df[i, "x"] - x_range * stat_plot_size / 2,
+            ymin = coor_df[i, "y"] - y_range * stat_plot_size / 2,
+            xmax = coor_df[i, "x"] + x_range * stat_plot_size / 2,
+            ymax = coor_df[i, "y"] + y_range * stat_plot_size / 2
+          )
+        }
+        p <- p + stat_plot_list
+        legend_list[["stat.by"]] <- get_legend(
+          stat_plot[[coor_df[i, "group"]]] +
+            theme(legend.position = "bottom")
+        )
+      }
+
+      if (!is.null(lineages)) {
+        lineages_layers <- c(list(ggnewscale::new_scale_color()), lineages_layers)
+        suppressMessages({
+          legend_list[["lineages"]] <- get_legend(
+            ggplot() +
+              lineages_layers +
+              theme_scop(
+                legend.position = "bottom",
+                legend.direction = legend.direction
+              )
+          )
+        })
+        p <- suppressWarnings({
+          p + lineages_layers + theme(legend.position = "none")
+        })
+        if (is.null(legend_list[["lineages"]])) {
+          legend_list["lineages"] <- list(NULL)
+        }
+      }
+
+      if (!is.null(paga)) {
+        paga_layers <- c(list(ggnewscale::new_scale_color()), paga_layers)
+        if (g != paga$groups) {
+          suppressMessages({
+            legend_list[["paga"]] <- get_legend(
+              ggplot() +
+                paga_layers +
+                theme_scop(
+                  legend.position = "bottom",
+                  legend.direction = legend.direction
+                )
+            )
+          })
+        }
+        p <- suppressWarnings({
+          p + paga_layers + theme(legend.position = "none")
+        })
+        if (is.null(legend_list[["paga"]])) {
+          legend_list["paga"] <- list(NULL)
+        }
+      }
+
+      if (!is.null(velocity)) {
+        velocity_layers <- c(
+          list(ggnewscale::new_scale_color()),
+          list(ggnewscale::new_scale("size")),
+          velocity_layers
+        )
+        if (velocity_plot_type == "stream" && is.null(streamline_color)) {
+          suppressMessages({
+            legend_list[["velocity"]] <- get_legend(
+              ggplot() +
+                velocity_layers +
+                theme_scop(
+                  legend.position = "bottom",
+                  legend.direction = legend.direction
+                )
+            )
+          })
+        }
+        p <- suppressWarnings({
+          p + velocity_layers + theme(legend.position = "none")
+        })
+        if (is.null(legend_list[["velocity"]])) {
+          legend_list["velocity"] <- list(NULL)
+        }
+      }
+
+      if (isTRUE(label)) {
+        label_df <- stats::aggregate(
+          p$data[, c("x", "y")],
+          by = list(p$data[["label.by"]]),
+          FUN = stats::median
+        )
+        colnames(label_df)[1] <- "label"
+        label_df <- label_df[!is.na(label_df[, "label"]), , drop = FALSE]
+        if (isFALSE(label_insitu)) {
+          label_df[, "label"] <- seq_len(nrow(label_df))
+        }
+        if (isTRUE(label_repel)) {
+          p <- p +
+            geom_point(
+              data = label_df,
+              mapping = aes(x = .data[["x"]], y = .data[["y"]]),
+              shape = "circle",
+              color = label_point_color,
+              size = label_point_size
+            ) +
+            ggrepel::geom_text_repel(
+              data = label_df,
+              aes(x = .data[["x"]], y = .data[["y"]], label = .data[["label"]]),
+              fontface = "bold",
+              min.segment.length = 0,
+              segment.color = label_segment_color,
+              point.size = label_point_size,
+              max.overlaps = 100,
+              force = label_repulsion,
+              color = label.fg,
+              bg.color = label.bg,
+              bg.r = label.bg.r,
+              size = label.size,
+              inherit.aes = FALSE
+            )
+        } else {
+          p <- p +
+            ggrepel::geom_text_repel(
+              data = label_df,
+              aes(
+                x = .data[["x"]],
+                y = .data[["y"]],
+                label = .data[["label"]]
+              ),
+              fontface = "bold",
+              min.segment.length = 0,
+              segment.color = label_segment_color,
+              point.size = NA,
+              max.overlaps = 100,
+              force = 0,
+              color = label.fg,
+              bg.color = label.bg,
+              bg.r = label.bg.r,
+              size = label.size,
+              inherit.aes = FALSE
+            )
+        }
+      }
+
+      if (length(legend_list) > 0) {
+        legend_list <- legend_list[!sapply(legend_list, is.null)]
+        if (is.null(nested_legend)) {
+          legend_base <- get_legend(
+            p_base +
+              theme_scop(
+                legend.position = "bottom",
+                legend.direction = legend.direction
+              )
+          )
+        } else {
+          legend_base <- nested_legend
+        }
+        if (legend.direction == "vertical") {
+          legend <- do.call(cbind, c(list(base = legend_base), legend_list))
+        } else {
+          legend <- do.call(rbind, c(list(base = legend_base), legend_list))
+        }
+        gtable <- as_grob(p + theme(legend.position = "none"))
+        gtable <- add_grob(gtable, legend, legend.position)
+        p <- patchwork::wrap_plots(gtable)
+      } else if (!is.null(nested_legend)) {
+        gtable <- as_grob(p + theme(legend.position = "none"))
+        gtable <- add_grob(
+          gtable,
+          nested_legend,
+          legend.position,
+          space = attr(nested_legend, "legend_space") %||% NULL,
+          clip = "off"
+        )
+        p <- patchwork::wrap_plots(gtable)
+      }
+
+      return(p)
+    }
+  )
+
+  combine_plot_list(
+    plist,
+    combine = combine, nrow = nrow, ncol = ncol, byrow = byrow
+  )
+}
+
+cell_dim_grid_layer <- function(
+  dat,
+  add_grid = FALSE,
+  grid_n = 12,
+  grid_color = "black",
+  grid_size = 0.25,
+  grid_alpha = 0.35
+) {
+  if (!isTRUE(add_grid)) {
+    return(NULL)
+  }
+  if (!is.numeric(grid_n) || length(grid_n) != 1L || is.na(grid_n) || grid_n < 2) {
+    log_message(
+      "{.arg grid_n} must be a single numeric value greater than or equal to 2",
+      message_type = "error"
+    )
+  }
+  x_range <- range(dat[["x"]], na.rm = TRUE)
+  y_range <- range(dat[["y"]], na.rm = TRUE)
+  if (!all(is.finite(c(x_range, y_range)))) {
+    return(NULL)
+  }
+  grid_df <- expand.grid(
+    x = seq(x_range[1], x_range[2], length.out = grid_n),
+    y = seq(y_range[1], y_range[2], length.out = grid_n)
+  )
+  ggplot2::geom_point(
+    data = grid_df,
+    mapping = ggplot2::aes(x = .data[["x"]], y = .data[["y"]]),
+    inherit.aes = FALSE,
+    shape = 16,
+    color = grid_color,
+    size = grid_size,
+    alpha = grid_alpha,
+    show.legend = FALSE
+  )
+}
+
+dim_plot_graph_layers <- function(
+  graph,
+  dat,
+  edge_color,
+  edge_alpha,
+  edge_size
+) {
+  if (is.null(graph)) {
+    return(NULL)
+  }
+
+  net_cells <- rownames(dat)
+  net_sub <- graph[net_cells, net_cells, drop = FALSE]
+  if (inherits(net_sub, "sparseMatrix")) {
+    tri <- Matrix::summary(net_sub)
+    keep <- tri[, 1L] >= tri[, 2L]
+    net_df <- data.frame(
+      Var1 = rownames(net_sub)[tri[keep, 1L]],
+      Var2 = colnames(net_sub)[tri[keep, 2L]],
+      value = as.numeric(tri[keep, 3L]),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    net_mat <- as_matrix(net_sub)
+    net_mat[net_mat == 0] <- NA
+    net_mat[upper.tri(net_mat)] <- NA
+    net_df <- reshape2::melt(net_mat, na.rm = TRUE, stringsAsFactors = FALSE)
+    net_df[, "value"] <- as.numeric(net_df[, "value"])
+    net_df[, "Var1"] <- as.character(net_df[, "Var1"])
+    net_df[, "Var2"] <- as.character(net_df[, "Var2"])
+  }
+  net_df[, "x"] <- dat[net_df[, "Var1"], "x"]
+  net_df[, "y"] <- dat[net_df[, "Var1"], "y"]
+  net_df[, "xend"] <- dat[net_df[, "Var2"], "x"]
+  net_df[, "yend"] <- dat[net_df[, "Var2"], "y"]
+
+  list(
+    geom_segment(
+      data = net_df,
+      mapping = aes(
+        x = x,
+        y = y,
+        xend = xend,
+        yend = yend,
+        linewidth = value
+      ),
+      color = edge_color,
+      alpha = edge_alpha,
+      show.legend = FALSE
+    ),
+    scale_linewidth_continuous(range = edge_size)
+  )
+}
+
+dim_plot_density_layers <- function(
+  add_density,
+  density_filled,
+  density_color,
+  density_filled_palette,
+  density_filled_palcolor,
+  line_show_legend = NA
+) {
+  if (!isTRUE(add_density)) {
+    return(NULL)
+  }
+  if (!isTRUE(density_filled)) {
+    return(
+      geom_density_2d(
+        aes(x = .data[["x"]], y = .data[["y"]]),
+        color = density_color,
+        inherit.aes = FALSE,
+        show.legend = line_show_legend
+      )
+    )
+  }
+
+  filled_color <- palette_colors(
+    palette = density_filled_palette,
+    palcolor = density_filled_palcolor
+  )
+  list(
+    stat_density_2d(
+      geom = "raster",
+      aes(x = .data[["x"]], y = .data[["y"]], fill = after_stat(density)),
+      contour = FALSE,
+      inherit.aes = FALSE,
+      show.legend = FALSE
+    ),
+    scale_fill_gradientn(name = "Density", colours = filled_color),
+    ggnewscale::new_scale_fill()
+  )
+}
+
+cell_dim_palette_colors <- function(
+  x,
+  palette = "Chinese",
+  palcolor = NULL,
+  ...
+) {
+  if (!is.null(palcolor) && !is.null(names(palcolor))) {
+    x_levels <- if (is.factor(x)) {
+      levels(x)
+    } else {
+      unique(as.character(x))
+    }
+    x_levels <- x_levels[!is.na(x_levels) & nzchar(x_levels)]
+    if (length(x_levels) > 0L && all(x_levels %in% names(palcolor))) {
+      palcolor <- palcolor[x_levels]
+    }
+  }
+  palette_colors(
+    x = x,
+    palette = palette,
+    palcolor = palcolor,
+    ...
+  )
+}
+
+cell_dim_nested_legend_grob <- function(
+  dat,
+  colors,
+  parent_colors = NULL,
+  title = NULL,
+  legend_direction = "horizontal",
+  legend_position = "bottom"
+) {
+  if (nrow(dat) == 0L) {
+    return(NULL)
+  }
+  legend_data <- cell_dim_nested_legend_data(
+    dat = dat,
+    colors = colors,
+    parent_colors = parent_colors
+  )
+  if (is.null(legend_data)) {
+    return(NULL)
+  }
+  parent_levels <- legend_data[["parent_levels"]]
+  parent_colors <- legend_data[["parent_colors"]]
+  nested_items <- legend_data[["nested_items"]]
+  side_legend <- legend_position %in% c("left", "right")
+  dense_side_legend <- isTRUE(side_legend) && length(parent_levels) > 8L
+  parent_text_size <- if (isTRUE(dense_side_legend)) 2.45 else 3
+  child_text_size <- if (isTRUE(dense_side_legend)) 2.45 else 3
+  child_point_size <- if (isTRUE(dense_side_legend)) 1.8 else 2.2
+
+  if (isTRUE(side_legend)) {
+    item_step <- 0.9
+    group_gap <- 1.1
+    max_column_depth <- if (isTRUE(dense_side_legend)) 35 else 18
+    label_values <- c(parent_levels, unlist(nested_items, use.names = FALSE))
+    max_label_chars <- max(nchar(label_values), na.rm = TRUE)
+    column_width <- max(2.8, min(4.8, 0.18 * max_label_chars + 1.35))
+
+    side_layout <- data.frame(
+      parent = character(),
+      column = integer(),
+      header_y = numeric(),
+      stringsAsFactors = FALSE
+    )
+    column_i <- 1L
+    y_cursor <- 0
+    for (parent_i in parent_levels) {
+      n_items <- length(nested_items[[parent_i]])
+      group_depth <- item_step * n_items + group_gap
+      if (nrow(side_layout) > 0L && abs(y_cursor - group_depth) > max_column_depth) {
+        column_i <- column_i + 1L
+        y_cursor <- 0
+      }
+      side_layout <- rbind(
+        side_layout,
+        data.frame(
+          parent = parent_i,
+          column = column_i,
+          header_y = y_cursor,
+          stringsAsFactors = FALSE
+        )
+      )
+      y_cursor <- y_cursor - group_depth
+    }
+    side_layout[["base_x"]] <- 0.34 + (side_layout[["column"]] - 1L) * column_width
+    header_df <- do.call(rbind, lapply(seq_len(nrow(side_layout)), function(i) {
+      parent_i <- side_layout[["parent"]][i]
+      data.frame(
+        parent = parent_i,
+        x = side_layout[["base_x"]][i],
+        y = side_layout[["header_y"]][i],
+        fill = unname(parent_colors[parent_i]),
+        stringsAsFactors = FALSE
+      )
+    }))
+    legend_items <- do.call(rbind, lapply(seq_len(nrow(side_layout)), function(i) {
+      parent_i <- side_layout[["parent"]][i]
+      subgroup_i <- nested_items[[parent_i]]
+      data.frame(
+        parent = parent_i,
+        subgroup = subgroup_i,
+        x = side_layout[["base_x"]][i] + 0.58,
+        y = side_layout[["header_y"]][i] - seq_along(subgroup_i) * item_step,
+        color = unname(colors[subgroup_i]),
+        stringsAsFactors = FALSE
+      )
+    }))
+    n_columns <- max(side_layout[["column"]])
+    x_limits <- c(0, 0.34 + n_columns * column_width)
+    y_limits <- c(-max_column_depth - 0.2, 0.22)
+  } else {
+    label_values <- c(parent_levels, unlist(nested_items, use.names = FALSE))
+    max_label_chars <- max(nchar(label_values), na.rm = TRUE)
+    column_width <- max(2, min(3.5, 0.16 * max_label_chars + 1.15))
+    parent_x <- 0.35 + (seq_along(parent_levels) - 1) * column_width
+    names(parent_x) <- parent_levels
+    header_df <- data.frame(
+      parent = parent_levels,
+      x = unname(parent_x[parent_levels]),
+      y = 0,
+      fill = unname(parent_colors[parent_levels]),
+      stringsAsFactors = FALSE
+    )
+    legend_items <- do.call(rbind, lapply(parent_levels, function(parent_i) {
+      subgroup_i <- nested_items[[parent_i]]
+      data.frame(
+        parent = parent_i,
+        subgroup = subgroup_i,
+        x = unname(parent_x[parent_i]) + 0.58,
+        y = -seq_along(subgroup_i),
+        color = unname(colors[subgroup_i]),
+        stringsAsFactors = FALSE
+      )
+    }))
+    x_limits <- c(0, max(parent_x) + column_width * 0.55)
+    y_limits <- c(min(legend_items[["y"]], -1) - 0.35, 0.45)
+  }
+  legend_plot <- ggplot() +
+    geom_label(
+      data = header_df,
+      mapping = aes(
+        x = .data[["x"]],
+        y = .data[["y"]],
+        label = .data[["parent"]],
+        fill = .data[["parent"]]
+      ),
+      color = "white",
+      fontface = "bold",
+      linewidth = 0,
+      label.r = grid::unit(0, "pt"),
+      label.padding = grid::unit(1.8, "pt"),
+      hjust = 0,
+      size = parent_text_size,
+      show.legend = FALSE,
+      inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = legend_items,
+      mapping = aes(x = .data[["x"]] - 0.26, y = .data[["y"]]),
+      color = legend_items[["color"]],
+      size = child_point_size,
+      show.legend = FALSE,
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      data = legend_items,
+      mapping = aes(x = .data[["x"]] - 0.08, y = .data[["y"]], label = .data[["subgroup"]]),
+      hjust = 0,
+      size = child_text_size,
+      show.legend = FALSE,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_manual(values = stats::setNames(header_df[["fill"]], header_df[["parent"]])) +
+    coord_cartesian(
+      xlim = x_limits,
+      ylim = y_limits,
+      clip = "off"
+    ) +
+    theme_void() +
+    theme(
+      plot.margin = grid::unit(c(1, 2, 1, 2), "pt"),
+      legend.position = "none"
+    )
+
+  legend_grob <- as_grob(legend_plot)
+  if (isTRUE(side_legend)) {
+    attr(legend_grob, "legend_space") <- grid::unit(
+      max(1.85, min(7.2, 0.82 * diff(x_limits))),
+      "in"
+    )
+  } else {
+    attr(legend_grob, "legend_space") <- grid::unit(
+      max(0.42, 0.16 * abs(min(y_limits)) + 0.2),
+      "in"
+    )
+  }
+  legend_grob
+}
+
+cell_dim_nested_legend_data <- function(
+  dat,
+  colors,
+  parent_colors = NULL
+) {
+  group_levels <- names(colors)
+  group_levels <- group_levels[group_levels %in% as.character(dat[["group.by"]])]
+  if (length(group_levels) == 0L) {
+    return(NULL)
+  }
+  parent_levels <- if (is.factor(dat[["legend.by"]])) {
+    levels(droplevels(dat[["legend.by"]]))
+  } else {
+    unique(as.character(dat[["legend.by"]]))
+  }
+  parent_levels <- parent_levels[nzchar(parent_levels)]
+  if (length(parent_levels) == 0L) {
+    return(NULL)
+  }
+  nested_items <- lapply(parent_levels, function(parent_i) {
+    subgroup_i <- group_levels[
+      group_levels %in% as.character(dat[dat[["legend.by"]] == parent_i, "group.by"])
+    ]
+    subgroup_i
+  })
+  names(nested_items) <- parent_levels
+  parent_levels <- parent_levels[lengths(nested_items) > 0L]
+  nested_items <- nested_items[parent_levels]
+  if (length(parent_levels) == 0L) {
+    return(NULL)
+  }
+
+  fallback_parent_colors <- vapply(parent_levels, function(parent_i) {
+    subgroup_i <- nested_items[[parent_i]]
+    unname(colors[subgroup_i[1]])
+  }, character(1))
+  if (is.null(parent_colors)) {
+    parent_colors <- fallback_parent_colors
+  } else {
+    parent_colors <- parent_colors[parent_levels]
+    missing_parent_colors <- is.na(parent_colors) | !nzchar(parent_colors)
+    parent_colors[missing_parent_colors] <- fallback_parent_colors[missing_parent_colors]
+  }
+
+  list(
+    group_levels = group_levels,
+    parent_levels = parent_levels,
+    nested_items = nested_items,
+    parent_colors = parent_colors
+  )
+}
+
+#' @title 3D-Dimensional reduction plot for cell classification visualization.
+#'
+#' @md
+#' @inheritParams CellDimPlot
+#' @inheritParams scop-params
+#'
+#' @description
+#' Color cells in 3D reduction space, or draw an interactive density surface.
+#'
+#' @md
+#' @inheritParams CellDimPlot
+#' @param plot_type `"scatter"` (3D points) or `"density_surface"` (kernel
+#' density of the first two dimensions).
+#' @param dims For `"scatter"`, a length-3 vector of x/y/z dimensions. For
+#' `"density_surface"`, the first two dimensions are x/y and density is z.
+#' @param axis_labs Length-3 axis labels.
+#' @param density_n Grid size used by `MASS::kde2d()` for
+#'   `plot_type = "density_surface"`.
+#' @param density_bandwidth Bandwidth passed to `MASS::kde2d()`. A single value
+#'   scales the default x and y bandwidth; a two-length vector supplies absolute
+#'   x and y bandwidths.
+#' @param density_threshold Relative density values below this cutoff are
+#'   removed from the surface.
+#' @param density_power Power transform applied to relative density before
+#'   plotting. Values below 1 broaden peaks.
+#' @param density_colors Colors used for the density surface. The last colors
+#'   are reserved for the highest density peaks.
+#' @param density_color_stops Numeric stops between 0 and 1 for
+#'   `density_colors`. By default, red is reserved for the highest density
+#'   peaks.
+#' @param density_surface_opacity Opacity for density surfaces.
+#' @param density_label Whether to add group labels to the density surface.
+#' @param density_label_color Whether group labels use the same palette as
+#'   `CellDimPlot()`.
+#' @param density_label_top_n Maximum number of group labels to draw.
+#' @param density_label_min_distance Minimum distance between labels in the
+#'   x-y embedding space, expressed as a fraction of the larger embedding range.
+#' @param density_show_axes,density_show_colorbar,density_show_title Whether to
+#'   show axes, colorbar, and title for `plot_type = "density_surface"`.
+#' @param span The span of the loess smoother for lineages line.
+#' @param shape.highlight Shape of the cell to highlight.
+#' See \href{https://plotly.com/r/reference/scattergl/#scattergl-marker-symbol}{scattergl-marker-symbol}
+#' @param width Width in pixels, defaults to automatic sizing.
+#' @param height Height in pixels, defaults to automatic sizing.
+#' @param save The name of the file to save the plot to. Must end in ".html".
+#'
+#' @seealso
+#' [CellDimPlot], [FeatureDimPlot3D]
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(
+#'   pancreas_sub,
+#'   nonlinear_reduction_dims = 3
+#' )
+#' CellDimPlot3D(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "StandardpcaUMAP3D"
+#' )
+#'
+#' CellDimPlot3D(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   plot_type = "density_surface",
+#'   reduction = "umap",
+#'   dims = c(1, 2),
+#'   density_label = TRUE
+#' )
+#'
+#' pancreas_sub <- RunSlingshot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "StandardpcaUMAP3D",
+#'   show_plot = FALSE
+#' )
+#' CellDimPlot3D(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "StandardpcaUMAP3D",
+#'   lineages = "Lineage1"
+#' )
+CellDimPlot3D <- function(
+  object,
+  group.by,
+  plot_type = c("scatter", "density_surface"),
+  reduction = NULL,
+  dims = c(1, 2, 3),
+  axis_labs = NULL,
+  palette = "Chinese",
+  palcolor = NULL,
+  bg_color = "grey80",
+  pt.size = 1.5,
+  cells.highlight = NULL,
+  cols.highlight = "black",
+  shape.highlight = "circle-open",
+  sizes.highlight = 2,
+  lineages = NULL,
+  lineages_palette = "Dark2",
+  density_n = 200,
+  density_bandwidth = 1,
+  density_threshold = 0.018,
+  density_power = 0.52,
+  density_colors = c("#ffffff", "#edf9fa", "#c7e6ed", "#7faac2", "#294a74", "#11162f", "#7f1025", "#ef3b2c"),
+  density_color_stops = c(0, 0.02, 0.12, 0.35, 0.62, 0.82, 0.93, 1),
+  density_surface_opacity = 0.78,
+  density_label = FALSE,
+  density_label_color = TRUE,
+  density_label_top_n = Inf,
+  density_label_min_distance = 0.08,
+  density_show_axes = TRUE,
+  density_show_colorbar = TRUE,
+  density_show_title = TRUE,
+  span = 0.75,
+  width = NULL,
+  height = NULL,
+  save = NULL,
+  force = FALSE,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  plot_type <- match.arg(plot_type)
+  if (identical(plot_type, "density_surface") && length(dims) < 2L) {
+    log_message(
+      "{.arg dims} must contain at least two dimensions for {.val plot_type = 'density_surface'}",
+      message_type = "error"
+    )
+  }
+  bg_color <- col2hex(bg_color)
+  cols.highlight <- col2hex(cols.highlight)
+
+  for (i in c(group.by)) {
+    if (!i %in% colnames(srt@meta.data)) {
+      log_message(
+        paste0(i, " is not in the meta.data of srt object."),
+        message_type = "error"
+      )
+    }
+    if (!is.factor(srt@meta.data[[i]])) {
+      srt@meta.data[[i]] <- factor(
+        srt@meta.data[[i]],
+        levels = unique(srt@meta.data[[i]])
+      )
+    }
+  }
+  for (l in lineages) {
+    if (!l %in% colnames(srt@meta.data)) {
+      log_message(
+        paste0(l, " is not in the meta.data of srt object."),
+        message_type = "error"
+      )
+    }
+  }
+  if (is.null(reduction)) {
+    reduction <- DefaultReduction(
+      srt,
+      min_dim = if (identical(plot_type, "density_surface")) 2 else 3
+    )
+  } else {
+    reduction <- DefaultReduction(
+      srt,
+      pattern = reduction,
+      min_dim = if (identical(plot_type, "density_surface")) 2 else 3
+    )
+  }
+  if (!reduction %in% names(srt@reductions)) {
+    log_message(
+      paste0(reduction, " is not in the srt reduction names."),
+      message_type = "error"
+    )
+  }
+  min_dim <- if (identical(plot_type, "density_surface")) 2 else 3
+  if (ncol(srt@reductions[[reduction]]@cell.embeddings) < min_dim) {
+    log_message(
+      paste0(
+        "Reduction must be in ",
+        if (identical(plot_type, "density_surface")) "two" else "three",
+        " dimensions or higher."
+      ),
+      message_type = "error"
+    )
+  }
+  if (!is.null(cells.highlight) && isFALSE(cells.highlight)) {
+    if (!any(cells.highlight %in% colnames(srt@assays[[1]]))) {
+      log_message(
+        "No cells in 'cells.highlight' found in srt.",
+        message_type = "error"
+      )
+    }
+    if (!all(cells.highlight %in% colnames(srt@assays[[1]]))) {
+      log_message(
+        "Some cells in 'cells.highlight' not found in srt.",
+        message_type = "warning",
+        verbose = verbose
+      )
+    }
+    cells.highlight <- intersect(cells.highlight, colnames(srt@assays[[1]]))
+  }
+  reduction_key <- srt@reductions[[reduction]]@key
+  if (identical(plot_type, "density_surface")) {
+    if (is.null(axis_labs) || length(axis_labs) < 2) {
+      xlab <- paste0(reduction_key, dims[1])
+      ylab <- paste0(reduction_key, dims[2])
+      zlab <- "Density"
+    } else {
+      xlab <- axis_labs[1]
+      ylab <- axis_labs[2]
+      zlab <- axis_labs[3] %||% "Density"
+    }
+  } else if (is.null(axis_labs) || length(axis_labs) != 3) {
+    xlab <- paste0(reduction_key, dims[1])
+    ylab <- paste0(reduction_key, dims[2])
+    zlab <- paste0(reduction_key, dims[3])
+  } else {
+    xlab <- axis_labs[1]
+    ylab <- axis_labs[2]
+    zlab <- axis_labs[3]
+  }
+  if ((!is.null(save) && is.character(save) && nchar(save) > 0)) {
+    check_r("htmlwidgets", verbose = FALSE)
+    if (!grepl(".html$", save)) {
+      log_message(
+        "'save' must be a string with .html as a suffix.",
+        message_type = "error"
+      )
+    }
+  }
+
+  dat_dim <- srt@reductions[[reduction]]@cell.embeddings
+  colnames(dat_dim) <- paste0(reduction_key, seq_len(ncol(dat_dim)))
+  rownames(dat_dim) <- rownames(dat_dim) %||% colnames(srt@assays[[1]])
+  dat_use <- cbind(
+    dat_dim[colnames(srt@assays[[1]]), , drop = FALSE],
+    srt@meta.data[colnames(srt@assays[[1]]), , drop = FALSE]
+  )
+  nlev <- sapply(dat_use[, group.by, drop = FALSE], nlevels)
+  nlev <- nlev[nlev > 100]
+  if (length(nlev) > 0 && isFALSE(force)) {
+    log_message(
+      paste0(
+        "The following variables have more than 100 levels: ",
+        paste(names(nlev), collapse = ",")
+      ),
+      message_type = "warning",
+      verbose = verbose
+    )
+    if (interactive()) {
+      answer <- utils::askYesNo("Are you sure to continue?", default = FALSE)
+      if (isFALSE(answer)) {
+        return(invisible(NULL))
+      }
+    }
+  }
+  if (!is.null(lineages)) {
+    dat_lineages <- srt@meta.data[, unique(lineages), drop = FALSE]
+    dat_use <- cbind(dat_use, dat_lineages[row.names(dat_use), , drop = FALSE])
+  }
+  dat_use[["group.by"]] <- dat_use[[group.by]]
+  if (any(is.na(dat_use[[group.by]]))) {
+    n <- as.character(dat_use[[group.by]])
+    n[is.na(n)] <- "NA"
+    dat_use[[group.by]] <- factor(
+      n,
+      levels = c(levels(dat_use[[group.by]]), "NA")
+    )
+  }
+
+  dat_use[["color"]] <- dat_use[[group.by]]
+  colors <- palette_colors(
+    dat_use[["group.by"]],
+    palette = palette,
+    palcolor = palcolor,
+    NA_color = bg_color,
+    NA_keep = TRUE
+  )
+
+  if (identical(plot_type, "density_surface")) {
+    check_r("MASS", verbose = FALSE)
+    if (!is.numeric(density_n) || length(density_n) != 1L || density_n < 10) {
+      log_message(
+        "{.arg density_n} must be a single numeric value greater than or equal to 10",
+        message_type = "error"
+      )
+    }
+    if (
+      !is.numeric(density_bandwidth) ||
+        !length(density_bandwidth) %in% c(1L, 2L) ||
+        any(!is.finite(density_bandwidth)) ||
+        any(density_bandwidth <= 0)
+    ) {
+      log_message(
+        "{.arg density_bandwidth} must be a positive numeric vector of length one or two",
+        message_type = "error"
+      )
+    }
+    if (
+      !is.numeric(density_threshold) ||
+        length(density_threshold) != 1L ||
+        !is.finite(density_threshold) ||
+        density_threshold < 0
+    ) {
+      log_message(
+        "{.arg density_threshold} must be a finite non-negative number",
+        message_type = "error"
+      )
+    }
+    if (
+      !is.numeric(density_power) ||
+        length(density_power) != 1L ||
+        !is.finite(density_power) ||
+        density_power <= 0
+    ) {
+      log_message(
+        "{.arg density_power} must be a finite positive number",
+        message_type = "error"
+      )
+    }
+    if (
+      !is.numeric(density_color_stops) ||
+        length(density_color_stops) != length(density_colors) ||
+        any(!is.finite(density_color_stops)) ||
+        any(density_color_stops < 0 | density_color_stops > 1) ||
+        is.unsorted(density_color_stops, strictly = TRUE)
+    ) {
+      log_message(
+        "{.arg density_color_stops} must be a strictly increasing numeric vector between 0 and 1 with the same length as {.arg density_colors}",
+        message_type = "error"
+      )
+    }
+    if (
+      !is.numeric(density_label_top_n) ||
+        length(density_label_top_n) != 1L ||
+        is.na(density_label_top_n) ||
+        density_label_top_n < 0
+    ) {
+      log_message(
+        "{.arg density_label_top_n} must be a single non-negative number",
+        message_type = "error"
+      )
+    }
+    if (
+      !is.numeric(density_label_min_distance) ||
+        length(density_label_min_distance) != 1L ||
+        !is.finite(density_label_min_distance) ||
+        density_label_min_distance < 0
+    ) {
+      log_message(
+        "{.arg density_label_min_distance} must be a finite non-negative number",
+        message_type = "error"
+      )
+    }
+    x <- dat_use[[paste0(reduction_key, dims[1])]]
+    y <- dat_use[[paste0(reduction_key, dims[2])]]
+    keep <- is.finite(x) & is.finite(y)
+    if (sum(keep) < 3L) {
+      log_message(
+        "At least three finite cells are required for density surface plotting",
+        message_type = "error"
+      )
+    }
+    x <- x[keep]
+    y <- y[keep]
+    xrange <- range(x, na.rm = TRUE)
+    yrange <- range(y, na.rm = TRUE)
+    if (diff(xrange) <= 0 || diff(yrange) <= 0) {
+      log_message(
+        "Density surface plotting requires non-zero x and y ranges",
+        message_type = "error"
+      )
+    }
+    xpad <- diff(xrange) * 0.04
+    ypad <- diff(yrange) * 0.04
+    default_h <- c(MASS::bandwidth.nrd(x), MASS::bandwidth.nrd(y))
+    density_h <- if (length(density_bandwidth) == 1L) {
+      default_h * density_bandwidth
+    } else {
+      density_bandwidth
+    }
+    p <- plotly::plot_ly(width = width, height = height)
+    dens_lims <- c(xrange + c(-xpad, xpad), yrange + c(-ypad, ypad))
+    dens <- MASS::kde2d(
+      x = x,
+      y = y,
+      n = as.integer(density_n),
+      lims = dens_lims,
+      h = density_h
+    )
+    z <- dens$z / max(dens$z, na.rm = TRUE)
+    z[z < density_threshold] <- NA_real_
+    z <- z^density_power
+    z_plot <- z
+    z_plot[is.na(z_plot)] <- NA_real_
+
+    p <- plotly::add_surface(
+      p = p,
+      x = dens$x,
+      y = dens$y,
+      z = z_plot,
+      colorscale = lapply(
+        seq_along(density_colors) - 1,
+        function(i) {
+          list(density_color_stops[[i + 1]], density_colors[[i + 1]])
+        }
+      ),
+      cmin = 0,
+      cmax = 1,
+      opacity = density_surface_opacity,
+      showscale = isTRUE(density_show_colorbar),
+      colorbar = list(title = list(text = zlab)),
+      hovertemplate = paste0(
+        xlab,
+        ": %{x}<br>",
+        ylab,
+        ": %{y}<br>",
+        zlab,
+        ": %{z}<extra></extra>"
+      ),
+      name = "density",
+      showlegend = FALSE
+    )
+    label_centers <- data.frame()
+    if (isTRUE(density_label)) {
+      label_df <- dat_use[keep, , drop = FALSE]
+      group_vec <- label_df[["group.by"]]
+      group_levels <- levels(group_vec) %||% unique(as.character(group_vec))
+      group_levels <- group_levels[!is.na(group_levels) & nzchar(group_levels)]
+      label_rows <- lapply(group_levels, function(group_i) {
+        idx <- as.character(group_vec) == group_i
+        if (sum(idx, na.rm = TRUE) < 3L) {
+          return(NULL)
+        }
+        group_x <- label_df[[paste0(reduction_key, dims[1])]][idx]
+        group_y <- label_df[[paste0(reduction_key, dims[2])]][idx]
+        xi <- which.min(abs(dens$x - stats::median(group_x, na.rm = TRUE)))
+        yi <- which.min(abs(dens$y - stats::median(group_y, na.rm = TRUE)))
+        z_i <- z_plot[xi, yi]
+        data.frame(
+          group = group_i,
+          x = dens$x[[xi]],
+          y = dens$y[[yi]],
+          z = if (is.finite(z_i)) z_i + 0.05 else 0.05,
+          color = colors[[group_i]] %||% "black",
+          density = if (is.finite(z_i)) z_i else 0,
+          stringsAsFactors = FALSE
+        )
+      })
+      label_rows <- Filter(Negate(is.null), label_rows)
+      if (length(label_rows) > 0L) {
+        label_centers <- do.call(rbind, label_rows)
+        label_centers <- label_centers[
+          order(label_centers$density, decreasing = TRUE, na.last = TRUE), ,
+          drop = FALSE
+        ]
+        if (is.finite(density_label_top_n)) {
+          label_centers <- utils::head(
+            label_centers,
+            as.integer(density_label_top_n)
+          )
+        }
+        if (nrow(label_centers) > 1L && density_label_min_distance > 0) {
+          label_range <- max(diff(dens_lims[1:2]), diff(dens_lims[3:4]))
+          min_dist <- density_label_min_distance * label_range
+          keep_label <- rep(FALSE, nrow(label_centers))
+          kept_xy <- matrix(numeric(0), ncol = 2)
+          for (i in seq_len(nrow(label_centers))) {
+            xy <- c(label_centers$x[[i]], label_centers$y[[i]])
+            if (
+              nrow(kept_xy) == 0L ||
+                min(sqrt(rowSums((t(t(kept_xy) - xy))^2))) >= min_dist
+            ) {
+              keep_label[[i]] <- TRUE
+              kept_xy <- rbind(kept_xy, xy)
+            }
+          }
+          label_centers <- label_centers[keep_label, , drop = FALSE]
+        }
+      }
+    }
+    if (isTRUE(density_label) && nrow(label_centers) > 0L) {
+      if (isTRUE(density_label_color)) {
+        for (group_i in unique(label_centers$group)) {
+          label_i <- label_centers[label_centers$group == group_i, , drop = FALSE]
+          p <- plotly::add_trace(
+            p = p,
+            data = label_i,
+            x = ~x,
+            y = ~y,
+            z = ~z,
+            text = ~ as.character(group),
+            type = "scatter3d",
+            mode = "text",
+            textfont = list(size = 14, color = label_i$color[[1]]),
+            showlegend = FALSE,
+            hoverinfo = "skip",
+            name = group_i
+          )
+        }
+      } else {
+        p <- plotly::add_trace(
+          p = p,
+          data = label_centers,
+          x = ~x,
+          y = ~y,
+          z = ~z,
+          text = ~ as.character(group),
+          type = "scatter3d",
+          mode = "text",
+          textfont = list(size = 14, color = "black"),
+          showlegend = FALSE,
+          hoverinfo = "skip",
+          name = "labels"
+        )
+      }
+    }
+    p <- plotly::layout(
+      p = p,
+      title = if (isTRUE(density_show_title)) {
+        list(
+          text = paste0("Density surface", " (nCells:", length(x), ")"),
+          font = list(size = 16, color = "black"),
+          y = 0.95
+        )
+      } else {
+        list(text = "")
+      },
+      font = list(size = 12, color = "black"),
+      showlegend = FALSE,
+      margin = if (isTRUE(density_show_axes) || isTRUE(density_show_title)) {
+        NULL
+      } else {
+        list(l = 0, r = 0, b = 0, t = 0, pad = 0)
+      },
+      scene = list(
+        xaxis = list(
+          title = if (isTRUE(density_show_axes)) xlab else "",
+          range = dens_lims[1:2],
+          visible = isTRUE(density_show_axes),
+          showgrid = isTRUE(density_show_axes),
+          zeroline = isTRUE(density_show_axes),
+          showticklabels = isTRUE(density_show_axes)
+        ),
+        yaxis = list(
+          title = if (isTRUE(density_show_axes)) ylab else "",
+          range = dens_lims[3:4],
+          visible = isTRUE(density_show_axes),
+          showgrid = isTRUE(density_show_axes),
+          zeroline = isTRUE(density_show_axes),
+          showticklabels = isTRUE(density_show_axes)
+        ),
+        zaxis = list(
+          title = if (isTRUE(density_show_axes)) zlab else "",
+          range = c(0, 1.05),
+          visible = isTRUE(density_show_axes),
+          showgrid = isTRUE(density_show_axes),
+          zeroline = isTRUE(density_show_axes),
+          showticklabels = isTRUE(density_show_axes)
+        ),
+        camera = list(eye = list(x = 1.35, y = -1.55, z = 1.25)),
+        aspectratio = list(x = 1, y = 1, z = 0.55)
+      ),
+      autosize = FALSE
+    )
+    if ((!is.null(save) && is.character(save) && nchar(save) > 0)) {
+      htmlwidgets::saveWidget(
+        widget = plotly::as_widget(p),
+        file = save
+      )
+      unlink(gsub("\\.html", "_files", save), recursive = TRUE)
+    }
+    return(p)
+  }
+
+  dat_use[[paste0(reduction_key, dims[1], "All_cells")]] <- dat_use[[paste0(
+    reduction_key,
+    dims[1]
+  )]]
+  dat_use[[paste0(reduction_key, dims[2], "All_cells")]] <- dat_use[[paste0(
+    reduction_key,
+    dims[2]
+  )]]
+  dat_use[[paste0(reduction_key, dims[3], "All_cells")]] <- dat_use[[paste0(
+    reduction_key,
+    dims[3]
+  )]]
+  cells_highlight_use <- cells.highlight
+  if (isTRUE(cells_highlight_use)) {
+    cells_highlight_use <- rownames(dat_use)[dat_use[[group.by]] != "NA"]
+  }
+  if (!is.null(cells_highlight_use)) {
+    cells_highlight_use <- cells_highlight_use[
+      cells_highlight_use %in% rownames(dat_use)
+    ]
+    dat_use_highlight <- dat_use[cells_highlight_use, , drop = FALSE]
+  }
+
+  p <- plotly::plot_ly(data = dat_use, width = width, height = height)
+  p <- plotly::add_trace(
+    p = p,
+    data = dat_use,
+    x = dat_use[[paste0(reduction_key, dims[1], "All_cells")]],
+    y = dat_use[[paste0(reduction_key, dims[2], "All_cells")]],
+    z = dat_use[[paste0(reduction_key, dims[3], "All_cells")]],
+    text = paste0(
+      "Cell:",
+      rownames(dat_use),
+      "\ngroup.by:",
+      dat_use[["group.by"]],
+      "\ncolor:",
+      dat_use[["color"]]
+    ),
+    type = "scatter3d",
+    mode = "markers",
+    color = dat_use[[group.by]],
+    colors = colors,
+    marker = list(size = pt.size),
+    showlegend = TRUE,
+    visible = TRUE
+  )
+  if (!is.null(cells_highlight_use)) {
+    p <- plotly::add_trace(
+      p = p,
+      x = dat_use_highlight[[paste0(reduction_key, dims[1], "All_cells")]],
+      y = dat_use_highlight[[paste0(reduction_key, dims[2], "All_cells")]],
+      z = dat_use_highlight[[paste0(reduction_key, dims[3], "All_cells")]],
+      text = paste0(
+        "Cell:",
+        rownames(dat_use_highlight),
+        "\ngroup.by:",
+        dat_use_highlight[["group.by"]],
+        "\ncolor:",
+        dat_use_highlight[["color"]]
+      ),
+      type = "scatter3d",
+      mode = "markers",
+      marker = list(
+        size = sizes.highlight,
+        color = cols.highlight,
+        symbol = shape.highlight
+      ),
+      name = "highlight",
+      showlegend = TRUE,
+      visible = TRUE
+    )
+  }
+  if (!is.null(lineages)) {
+    for (l in lineages) {
+      dat_sub <- dat_use[!is.na(dat_use[[l]]), , drop = FALSE]
+      dat_sub <- dat_sub[order(dat_sub[[l]]), , drop = FALSE]
+
+      xlo <- stats::loess(
+        stats::formula(
+          paste(
+            paste0(reduction_key, dims[1], "All_cells"),
+            l,
+            sep = "~"
+          )
+        ),
+        data = dat_sub,
+        span = span,
+        degree = 2
+      )
+      ylo <- stats::loess(
+        stats::formula(
+          paste(
+            paste0(reduction_key, dims[2], "All_cells"),
+            l,
+            sep = "~"
+          )
+        ),
+        data = dat_sub,
+        span = span,
+        degree = 2
+      )
+      zlo <- stats::loess(
+        stats::formula(
+          paste(
+            paste0(reduction_key, dims[3], "All_cells"),
+            l,
+            sep = "~"
+          )
+        ),
+        data = dat_sub,
+        span = span,
+        degree = 2
+      )
+      dat_smooth <- data.frame(x = xlo$fitted, y = ylo$fitted, z = zlo$fitted)
+      dat_smooth <- dat_smooth[
+        dat_smooth[["x"]] <=
+          max(
+            dat_use[[paste0(reduction_key, dims[1], "All_cells")]],
+            na.rm = TRUE
+          ) &
+          dat_smooth[["x"]] >=
+            min(
+              dat_use[[paste0(reduction_key, dims[1], "All_cells")]],
+              na.rm = TRUE
+            ), ,
+        drop = FALSE
+      ]
+      dat_smooth <- dat_smooth[
+        dat_smooth[["y"]] <=
+          max(
+            dat_use[[paste0(reduction_key, dims[2], "All_cells")]],
+            na.rm = TRUE
+          ) &
+          dat_smooth[["y"]] >=
+            min(
+              dat_use[[paste0(reduction_key, dims[2], "All_cells")]],
+              na.rm = TRUE
+            ), ,
+        drop = FALSE
+      ]
+      dat_smooth <- dat_smooth[
+        dat_smooth[["z"]] <=
+          max(
+            dat_use[[paste0(reduction_key, dims[3], "All_cells")]],
+            na.rm = TRUE
+          ) &
+          dat_smooth[["z"]] >=
+            min(
+              dat_use[[paste0(reduction_key, dims[3], "All_cells")]],
+              na.rm = TRUE
+            ), ,
+        drop = FALSE
+      ]
+      dat_smooth <- unique(stats::na.omit(dat_smooth))
+      p <- plotly::add_trace(
+        p = p,
+        x = dat_smooth[, "x"],
+        y = dat_smooth[, "y"],
+        z = dat_smooth[, "z"],
+        text = paste0(
+          "Lineage:",
+          l
+        ),
+        type = "scatter3d",
+        mode = "lines",
+        line = list(
+          width = 6,
+          color = palette_colors(x = lineages, palette = lineages_palette)[l],
+          reverscale = FALSE
+        ),
+        name = l,
+        showlegend = TRUE,
+        visible = TRUE
+      )
+    }
+  }
+
+  p <- plotly::layout(
+    p = p,
+    title = list(
+      text = paste0("Total", " (nCells:", nrow(dat_use), ")"),
+      font = list(size = 16, color = "black"),
+      y = 0.95
+    ),
+    font = list(size = 12, color = "black"),
+    showlegend = TRUE,
+    legend = list(
+      itemsizing = "constant",
+      y = 0.5,
+      x = 1,
+      xanchor = "left",
+      alpha = 1
+    ),
+    scene = list(
+      xaxis = list(
+        title = xlab,
+        range = c(
+          min(dat_use[[paste0(reduction_key, dims[1])]], na.rm = TRUE),
+          max(dat_use[[paste0(reduction_key, dims[1])]], na.rm = TRUE)
+        )
+      ),
+      yaxis = list(
+        title = ylab,
+        range = c(
+          min(dat_use[[paste0(reduction_key, dims[2])]], na.rm = TRUE),
+          max(dat_use[[paste0(reduction_key, dims[2])]], na.rm = TRUE)
+        )
+      ),
+      zaxis = list(
+        title = zlab,
+        range = c(
+          min(dat_use[[paste0(reduction_key, dims[3])]], na.rm = TRUE),
+          max(dat_use[[paste0(reduction_key, dims[3])]], na.rm = TRUE)
+        )
+      ),
+      aspectratio = list(x = 1, y = 1, z = 1)
+    ),
+    autosize = FALSE
+  )
+
+  if ((!is.null(save) && is.character(save) && nchar(save) > 0)) {
+    htmlwidgets::saveWidget(
+      widget = plotly::as_widget(p),
+      file = save
+    )
+    unlink(paste0(tools::file_path_sans_ext(save), "_files"), recursive = TRUE)
+  }
+
+  return(p)
+}
+
+dim_plot_default_pt_size <- function(n) {
+  max(0.3, min(1, 0.6 * sqrt(5000 / n)))
+}
+
+dim_plot_point_config <- function(
+  n,
+  pt.size = NULL,
+  raster = NULL,
+  raster.dpi = c(512, 512)
+) {
+  pt.size_auto <- is.null(pt.size)
+  if (pt.size_auto) {
+    pt.size <- dim_plot_default_pt_size(n)
+  }
+  raster <- raster %||% dim_plot_auto_raster(n)
+  raster.dpi <- dim_plot_validate_raster_dpi(raster.dpi)
+  raster_pt_size <- if (isTRUE(raster)) {
+    dim_plot_raster_pt_size(
+      pt.size,
+      auto = pt.size_auto,
+      pixels = raster.dpi
+    )
+  } else {
+    NULL
+  }
+  list(
+    pt.size = pt.size,
+    raster = raster,
+    raster_pt_size = raster_pt_size,
+    raster.dpi = raster.dpi
+  )
+}
+
+dim_plot_validate_raster_dpi <- function(raster.dpi) {
+  if (
+    !is.null(raster.dpi) &&
+      (
+        !is.numeric(raster.dpi) ||
+          length(raster.dpi) != 2L ||
+          anyNA(raster.dpi) ||
+          any(!is.finite(raster.dpi)) ||
+          any(raster.dpi <= 0)
+      )
+  ) {
+    log_message(
+      "'{.arg raster.dpi}' must contain two positive finite numbers",
+      message_type = "error"
+    )
+  }
+  raster.dpi
+}
+
+dim_plot_raster_pt_size <- function(
+  pt.size,
+  auto = FALSE,
+  pixels = c(512, 512)
+) {
+  resolution_scale <- if (is.null(pixels)) {
+    1
+  } else {
+    sqrt(prod(pixels / c(512, 512)))
+  }
+  pointsize <- pt.size * resolution_scale
+  if (isTRUE(auto)) {
+    pointsize <- max(2 * resolution_scale, pointsize)
+  }
+  pointsize
+}
+
+dim_plot_auto_raster <- function(n) {
+  n > 1e5
+}

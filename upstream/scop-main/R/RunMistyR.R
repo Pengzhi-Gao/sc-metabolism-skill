@@ -1,0 +1,468 @@
+#' @title Run mistyR multiview spatial modeling
+#'
+#' @description
+#' Model feature expression using MISTy intraview and spatial predictors.
+#' Juxtaview and paraview predictors describe local and broader neighborhoods.
+#'
+#' @md
+#' @inheritParams thisutils::log_message
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A `Seurat` object.
+#' @param assay Assay used for expression. If `NULL`, the default assay is used.
+#' @param layer Assay layer used for expression values. Values must be finite;
+#' missing or infinite values are rejected rather than replaced by zero.
+#' @param features Features used by MISTy. If `NULL`, variable features are used
+#' when available; otherwise all assay features are used.
+#' @param image Name of the Seurat spatial image. Required when multiple images
+#' are present; a single image is selected automatically when `NULL`.
+#' @param coord.cols Metadata coordinate columns used when no Seurat image
+#' coordinates are available.
+#' @param coordinate_space Coordinate system used to build MISTy views. The
+#' default is raw acquisition coordinates; `"legacy_display"` remains an
+#' explicit compatibility option.
+#' @param sample.by Optional metadata column identifying independent samples.
+#' The selected cells must belong to one sample. Split independent samples into
+#' separate runs; when NULL, the caller is responsible for supplying one spatial
+#' coordinate field.
+#' @param views Spatial views to add besides the required intraview. One or both
+#' of `"para"` and `"juxta"`.
+#' @param para_l,para_zoi,para_family,para_approx,para_nn Parameters passed to
+#' `mistyR::add_paraview()`. `para_l` and `para_zoi` use the selected coordinate
+#' units; `para_nn` is a unitless neighbor count.
+#' @param juxta_neighbor_thr Neighbor threshold passed to
+#' `mistyR::add_juxtaview()`, expressed in the selected coordinate units.
+#' @param view_cached Whether generated mistyR views should use cache.
+#' @param results_folder Folder passed to `mistyR::run_misty()`. If `NULL`, a
+#' temporary folder is used.
+#' @param target_subset Original feature names or numeric indices of selected
+#' features to model. Character names are mapped to the internal MISTy names.
+#' @param seed,bypass_intra,cv_folds,model_cached,append
+#' Parameters passed to `mistyR::run_misty()`.
+#' @param tool_name Name used to store results in `srt@tools`.
+#' @param store_results Whether to store results in `srt@tools`.
+#' @param store_views Whether to store the mistyR view composition in
+#' `object@tools`. This can be large.
+#' @param ... Additional named arguments passed to `mistyR::run_misty()`.
+#'
+#' @return A `Seurat` object with results stored in `srt@tools[[tool_name]]`
+#' when `store_results = TRUE`.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' data(visium_human_pancreas_sub)
+#' spatial <- Seurat::NormalizeData(visium_human_pancreas_sub, verbose = FALSE)
+#' # Paraview bandwidth: 1000 full-resolution image pixels.
+#' spatial <- RunMistyR(
+#'   spatial,
+#'   assay = "Spatial", features = rownames(spatial)[1:5],
+#'   image = "slice1", views = "para", para_l = 1000,
+#'   cv_folds = 3, verbose = FALSE
+#' )
+#' MistyRPlot(spatial, type = "improvements", top_n = 5)
+#' }
+RunMistyR <- function(
+  object,
+  assay = NULL,
+  layer = "data",
+  features = NULL,
+  image = NULL,
+  coord.cols = c("col", "row"),
+  views = "para",
+  para_l = 10,
+  para_zoi = 0,
+  para_family = c("gaussian", "exponential", "linear", "constant"),
+  para_approx = 1,
+  para_nn = NULL,
+  juxta_neighbor_thr = 15,
+  view_cached = FALSE,
+  results_folder = NULL,
+  seed = 42,
+  target_subset = NULL,
+  bypass_intra = FALSE,
+  cv_folds = 10,
+  model_cached = FALSE,
+  append = FALSE,
+  tool_name = "MistyR",
+  store_results = TRUE,
+  store_views = FALSE,
+  verbose = TRUE,
+  coordinate_space = c("raw", "legacy_display"),
+  sample.by = NULL,
+  ...,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  coordinate_space <- match.arg(coordinate_space)
+  log_message(
+    "Running mistyR multiview spatial modeling",
+    message_type = "running",
+    verbose = verbose
+  )
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  validate_scalar_string(tool_name, "tool_name")
+  validate_scalar_flag(view_cached, "view_cached")
+  validate_scalar_flag(bypass_intra, "bypass_intra")
+  validate_scalar_flag(model_cached, "model_cached")
+  validate_scalar_flag(append, "append")
+  validate_scalar_flag(store_results, "store_results")
+  validate_scalar_flag(store_views, "store_views")
+  para_family <- match.arg(para_family)
+  views <- mistyr_validate_views(views)
+  para_l <- mistyr_assert_positive_number(para_l, "para_l")
+  para_zoi <- mistyr_assert_nonnegative_number(para_zoi, "para_zoi")
+  para_approx <- mistyr_assert_positive_number(para_approx, "para_approx")
+  if (!is.null(para_nn)) {
+    para_nn <- validate_positive_integer(para_nn, "para_nn")
+  }
+  juxta_neighbor_thr <- mistyr_assert_positive_number(juxta_neighbor_thr, "juxta_neighbor_thr")
+  cv_folds <- validate_positive_integer(cv_folds, "cv_folds")
+  extra_args <- list(...)
+  validate_named_param_list(extra_args, "...")
+
+  assay <- assay %||% SeuratObject::DefaultAssay(srt)
+  if (!assay %in% SeuratObject::Assays(srt)) {
+    log_message(
+      "{.arg assay} {.val {assay}} is not present in {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+  input <- mistyr_prepare_input(
+    srt = srt,
+    assay = assay,
+    layer = layer,
+    features = features,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space
+  )
+
+  if (!is.null(sample.by)) {
+    validate_scalar_string(sample.by, "sample.by")
+    if (!sample.by %in% colnames(srt@meta.data)) {
+      log_message("{.arg sample.by} must identify a metadata column", message_type = "error")
+    }
+    samples <- as.character(srt@meta.data[input$cells, sample.by])
+    if (anyNA(samples) || any(!nzchar(samples)) || length(unique(samples)) != 1L) {
+      log_message("RunMistyR requires a single sample; split independent samples into separate runs", message_type = "error")
+    }
+  }
+  targets <- mistyr_resolve_targets(target_subset, input$feature_map)
+
+  check_r("mistyR", verbose = FALSE)
+  create_initial_view <- get_namespace_fun("mistyR", "create_initial_view")
+  add_paraview <- get_namespace_fun("mistyR", "add_paraview")
+  add_juxtaview <- get_namespace_fun("mistyR", "add_juxtaview")
+  run_misty <- get_namespace_fun("mistyR", "run_misty")
+  collect_results <- get_namespace_fun("mistyR", "collect_results")
+
+  misty_views <- create_initial_view(input$expression)
+  if ("juxta" %in% views) {
+    misty_views <- add_juxtaview(
+      misty_views,
+      input$positions,
+      neighbor.thr = juxta_neighbor_thr,
+      cached = view_cached,
+      verbose = verbose
+    )
+  }
+  if ("para" %in% views) {
+    misty_views <- add_paraview(
+      misty_views,
+      input$positions,
+      l = para_l,
+      zoi = para_zoi,
+      family = para_family,
+      approx = para_approx,
+      nn = para_nn,
+      cached = view_cached,
+      verbose = verbose
+    )
+  }
+
+  results_folder <- results_folder %||% tempfile("scop-mistyr-")
+  run_args <- list(
+    views = misty_views,
+    results.folder = results_folder,
+    seed = seed,
+    target.subset = targets,
+    bypass.intra = bypass_intra,
+    cv.folds = cv_folds,
+    cached = model_cached,
+    append = append
+  )
+  run_args <- utils::modifyList(run_args, extra_args)
+  run_path <- do.call(run_misty, run_args)
+  misty_results <- collect_results(run_path)
+  summary <- mistyr_summary(misty_results, views = names(misty_views))
+
+  if (isTRUE(store_results)) {
+    bundle <- list(
+      results = misty_results,
+      summary = summary,
+      results_folder = run_path,
+      features = input$features,
+      feature_map = input$feature_map,
+      cells = input$cells,
+      parameters = list(
+        assay = assay,
+        layer = layer,
+        image = image,
+        coord.cols = coord.cols,
+        coordinate_space = coordinate_space,
+        views = views,
+        para_l = para_l,
+        para_zoi = para_zoi,
+        para_family = para_family,
+        para_approx = para_approx,
+        para_nn = para_nn,
+        juxta_neighbor_thr = juxta_neighbor_thr,
+        view_cached = view_cached,
+        results_folder = results_folder,
+        seed = seed,
+        target_subset = target_subset,
+        sample.by = sample.by,
+        bypass_intra = bypass_intra,
+        cv_folds = cv_folds,
+        model_cached = model_cached,
+        append = append,
+        tool_name = tool_name,
+        store_results = store_results,
+        store_views = store_views,
+        backend_args = extra_args
+      )
+    )
+    if (isTRUE(store_views)) {
+      bundle$views <- misty_views
+    }
+    srt@tools[[tool_name]] <- spatial_tag_coordinate_contract(bundle)
+  }
+
+  log_message(
+    "{.pkg mistyR} completed for {.val {length(input$features)}} feature{?s}",
+    message_type = "success",
+    verbose = verbose
+  )
+  srt
+}
+
+mistyr_prepare_input <- function(
+  srt,
+  assay,
+  layer,
+  features = NULL,
+  image = NULL,
+  coord.cols = c("col", "row"),
+  coordinate_space = c("raw", "legacy_display")
+) {
+  expr <- GetAssayData5(srt, assay = assay, layer = layer)
+  coords <- spatial_analysis_coords(
+    srt = srt,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space
+  )$data
+  cells <- colnames(srt)[colnames(srt) %in% rownames(coords)]
+  if (length(cells) == 0L) {
+    log_message("No cells or spots match spatial coordinates", message_type = "error")
+  }
+  coords <- coords[cells, , drop = FALSE]
+  keep <- is.finite(coords$x) & is.finite(coords$y)
+  if (!all(keep)) {
+    cells <- cells[keep]
+    coords <- coords[cells, , drop = FALSE]
+  }
+  if (length(cells) < 3L) {
+    log_message("At least three cells or spots with finite coordinates are required", message_type = "error")
+  }
+  features <- mistyr_resolve_features(srt, assay = assay, features = features)
+  expr <- expr[features, cells, drop = FALSE]
+  expr <- as.matrix(expr)
+  if (any(!is.finite(expr))) {
+    log_message("MISTy expression must contain only finite values; missing observations are not zero expression", message_type = "error")
+  }
+  expression <- as.data.frame(t(expr), check.names = FALSE)
+  original_features <- colnames(expression)
+  colnames(expression) <- make.names(colnames(expression), unique = TRUE)
+  positions <- data.frame(
+    x = as.numeric(coords$x),
+    y = as.numeric(coords$y),
+    row.names = cells,
+    stringsAsFactors = FALSE
+  )
+  list(
+    expression = expression,
+    positions = positions,
+    features = features,
+    cells = cells,
+    feature_map = stats::setNames(original_features, colnames(expression))
+  )
+}
+
+mistyr_resolve_features <- function(srt, assay, features = NULL) {
+  if (is.null(features)) {
+    features <- SeuratObject::VariableFeatures(srt, assay = assay)
+    if (length(features) == 0L) {
+      features <- rownames(srt[[assay]])
+    }
+  }
+  features <- unique(as.character(features))
+  missing <- setdiff(features, rownames(srt[[assay]]))
+  if (length(missing) > 0L) {
+    log_message(
+      "{.arg features} not found in assay {.val {assay}}: {.val {missing}}",
+      message_type = "error"
+    )
+  }
+  if (length(features) < 2L) {
+    log_message(
+      "At least two features are required for {.fn RunMistyR}",
+      message_type = "error"
+    )
+  }
+  features
+}
+
+mistyr_summary <- function(results, views = character()) {
+  improvements <- results$improvements %||% data.frame()
+  contributions <- results$contributions %||% data.frame()
+  importances <- results$importances.aggregated %||% list()
+  list(
+    views = views,
+    n_targets = if ("target" %in% colnames(improvements)) length(unique(improvements$target)) else NA_integer_,
+    n_improvement_records = if (is.data.frame(improvements)) nrow(improvements) else NA_integer_,
+    n_contribution_records = if (is.data.frame(contributions)) nrow(contributions) else NA_integer_,
+    importance_views = names(importances)
+  )
+}
+
+#' @title Plot stored MISTy results
+#'
+#' @description Plot model improvements or view contributions from a result
+#' produced by [RunMistyR()] without rerunning the backend.
+#'
+#' @param object Optional `Seurat` object containing `MistyR` results.
+#' @param res Optional result list, usually `object@tools$MistyR`.
+#' @param type Result table to plot.
+#' @param measure Numeric result column to display. For `type = "improvements"`
+#' use `"gain.R2"` or `"gain.RMSE"`; for `type = "contributions"`, use
+#' `"contribution"` or `"importance"` as provided by the backend. `NULL`
+#' defaults to `"gain.R2"` for improvements and `"contribution"` for
+#' contributions, and errors if that column is not present.
+#' @param top_n Maximum number of records shown after ranking by absolute value.
+#' @param target Optional target feature filter.
+#' @return A `ggplot` object.
+#' @seealso [RunMistyR()]
+#' @export
+MistyRPlot <- function(
+  object = NULL,
+  res = NULL,
+  type = c("improvements", "contributions"),
+  top_n = 20,
+  target = NULL,
+  measure = NULL
+) {
+  type <- match.arg(type)
+  if (is.null(res)) {
+    if (is.null(object) || !inherits(object, "Seurat")) {
+      log_message("Provide a {.cls Seurat} {.arg object} or a MistyR {.arg res}", message_type = "error")
+    }
+    res <- object@tools[["MistyR"]]
+  }
+  spatial_require_coordinate_contract(res, "RunMistyR()")
+  tab <- res$results[[type]] %||% NULL
+  if (!is.data.frame(tab) || nrow(tab) == 0L) {
+    log_message("MistyR result {.val {type}} is empty", message_type = "error")
+  }
+  if (!is.null(target) && "target" %in% colnames(tab)) {
+    feature_map <- res$feature_map %||% NULL
+    target_backend <- as.character(target)
+    if (!is.null(feature_map)) {
+      reverse_map <- stats::setNames(names(feature_map), unname(feature_map))
+      mapped <- unname(reverse_map[target_backend])
+      mapped <- mapped[!is.na(mapped)]
+      if (length(mapped) > 0L) {
+        target_backend <- unique(c(mapped, target_backend))
+      }
+    }
+    tab <- tab[as.character(tab$target) %in% target_backend, , drop = FALSE]
+  }
+  allowed <- if (identical(type, "improvements")) {
+    c("gain.R2", "gain.RMSE", "value")
+  } else {
+    c("contribution", "importance", "value")
+  }
+  value_col <- measure %||% allowed[[1L]]
+  if (length(value_col) != 1L || !value_col %in% allowed || !value_col %in% colnames(tab)) {
+    log_message(
+      "{.arg measure} must identify an available {.val {allowed}} column for {.arg type = '{type}'}",
+      message_type = "error"
+    )
+  }
+  tab$.value <- as.numeric(tab[[value_col]])
+  tab <- tab[is.finite(tab$.value), , drop = FALSE]
+  label_cols <- intersect(c("target", "view", "measure"), colnames(tab))
+  tab$.label <- if (length(label_cols)) do.call(paste, c(tab[label_cols], sep = " / ")) else rownames(tab)
+  thisplot::StatPlot(
+    meta.data = tab,
+    stat.by = ".label",
+    value.by = ".value",
+    stat_type = "value",
+    plot_type = "bar",
+    top_n = top_n,
+    rank.by = "absolute",
+    bar_fill = "#3C8DBC",
+    bar_width = 0.75,
+    title = paste("MISTy", type),
+    ylab = value_col,
+    flip = TRUE,
+    theme_use = thisplot::theme_this
+  )
+}
+
+mistyr_validate_views <- function(views) {
+  if (is.null(views)) {
+    return(character())
+  }
+  views <- unique(as.character(views))
+  allowed <- c("para", "juxta")
+  missing <- setdiff(views, allowed)
+  if (length(missing) > 0L) {
+    log_message(
+      "{.arg views} must contain only {.val para} and/or {.val juxta}. Invalid: {.val {missing}}",
+      message_type = "error"
+    )
+  }
+  views
+}
+
+
+mistyr_assert_positive_number <- function(x, arg) {
+  if (length(x) != 1L || is.na(x) || !is.finite(x) || x <= 0) {
+    log_message("{.arg {arg}} must be a positive finite number", message_type = "error")
+  }
+  as.numeric(x)
+}
+mistyr_assert_nonnegative_number <- function(x, arg) {
+  if (length(x) != 1L || is.na(x) || !is.finite(x) || x < 0) {
+    log_message("{.arg {arg}} must be a non-negative finite number", message_type = "error")
+  }
+  as.numeric(x)
+}
+
+mistyr_resolve_targets <- function(target_subset, feature_map) {
+  if (is.null(target_subset) || is.numeric(target_subset)) {
+    return(target_subset)
+  }
+  if (!is.character(target_subset) || anyNA(target_subset) ||
+      any(!target_subset %in% unname(feature_map))) {
+    log_message("{.arg target_subset} must name selected original features or use numeric indices", message_type = "error")
+  }
+  unname(names(feature_map)[match(target_subset, unname(feature_map))])
+}

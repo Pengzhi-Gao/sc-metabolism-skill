@@ -1,0 +1,266 @@
+---
+title: "Introduction to VISION"
+package: "`r BiocStyle::pkg_ver('BiocStyle')`"
+output: BiocStyle::html_document
+vignette: >
+  %\VignetteIndexEntry{Introduction to VISION}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+``` {r options, include=F, cache=F, results='hide', message=F}
+
+knitr::opts_chunk$set(fig.align="center", cache=FALSE,error=FALSE,
+                      fig.width=6,fig.height=6,autodep=TRUE,
+                      out.width="600px", out.height="600px",
+                      results="markup", echo=TRUE, eval=FALSE)
+
+options(getClass.msg=FALSE)
+
+set.seed(6473) ## for reproducibility
+
+```
+
+# Preliminaries
+
+If you have yet to install VISION, we recommend installing the package from Github to install this package. Full source code can be found at the VISION Github repository, available [here](http://www.github.com/YosefLab/VISION).
+
+```r
+require(devtools)
+install_github("YosefLab/VISION")
+```
+
+If you encounter errors in the installation, it is likely because a dependency is not installed correctly. Pay special attention to the error message, and in particular whether or not it notifies you that specific dependencies are not found.
+
+After a successful installation, you can proceed by loading VISION using `library(VISION)`.
+
+# Using VISION
+
+Running an analysis with vision consists of three steps:
+
+1. Creating the VISION object
+2. Running the `analyze` function
+3. Browsing results
+
+## Creating the VISION object
+
+Creating the VISION object requires a gene expression matrix and *either* a list of Gene Signatures or a data.frame of meta-data.
+
+In this example - both are provided.
+
+```{r, collapse=F, message=T, eval=F}
+# Load VISION
+library(VISION)
+
+# Read in expression counts (Genes X Cells)
+counts <- read.table("data/expression_matrix.txt.gz",
+                     header = TRUE,
+                     sep = '\t',
+                     row.names = 1)
+
+# Scale counts within a sample
+n.umi <- colSums(counts)
+
+scaled_counts <- t(t(counts) / n.umi) * median(n.umi)
+
+# Read in meta data (Cells x Vars)
+meta = read.table("data/glio_meta.txt.gz", sep='\t', header=T, row.names=1)
+
+vis <- Vision(scaled_counts,
+              signatures = c("data/h.all.v5.2.symbols.gmt"),
+              meta = meta)
+```
+
+**Expression Data**
+
+The provided expression data should be scaled and normalized.  The example above shows just a simple UMI-scaling, but it is recommended to apply more advanced normalization procedures such as batch correction or removal of technical confounders.
+
+The expression data should not be log-transformed prior to loading into VISION.
+
+**Signatures**
+
+Signatures can be provided as a list of paths to signature files (\*.gmt) or Signature objects.
+
+See [the signature vignette](Signatures.html) for more information on finding or creating gene Signatures.
+
+**Meta Data**
+
+An R data.frame with cell-level meta-data.  This could be confounding variables (e.g. percentage of mitochondrial RNA, number of genes detected) or experimental covariates (e.g. genotype, donor, batch).
+
+This input is optional if Signatures are provided.
+
+**Other Options**
+
+Other options and inputs can be provided to customize how VISION runs.  For information on this, see the "Customizing VISION Analysis" section below.
+
+## Running an Analysis
+
+To run an analysis, simply call the analyze function:
+
+```{r, collapse=T, message=F, eval=F}
+# Set the number of threads when running parallel computations
+# On Windows, this must either be omitted or set to 1
+options(mc.cores = 2)
+
+vis <- analyze(vis)
+```
+
+## Viewing Results
+
+With the processed Vision object, a dynamic web report can be generated with the `viewResults()` function.
+
+```{r, collapse=T, message=F, results=F, eval=F}
+viewResults(vis)
+```
+
+This will launch a browser running the interactive report.
+
+Other options (port, host, browser) can be provided to control how this occurs.  For example, if you are launching a report on a remote server (such as an AWS instance) and want to make it accessible to others, run this with `host="0.0.0.0"`, some selected port number (e.g. `port=8888`), and `browser=FALSE` (so a browser isn't auto-opened).  Then the report should be available at "\<your instance IP address\>:8888".  (Note:  You will also likely need to enable inbound traffic on your selected port for this to work correctly).
+
+Alternately, you can work with the VISION object directly in R. For example:
+
+```{r, collapse=T, message=F, results=F, eval=F}
+# Display autocorrelation coefficients, p-values for signatures
+head(getSignatureAutocorrelation(vis))
+
+
+# Plot signature scores for a signature of interest
+tsne <- getProjections(vis)[["tSNE30"]]
+sigScores <- getSignatureScores(vis)[, "HALLMARK_INTERFERON_GAMMA_RESPONSE"]
+
+library(ggplot2)
+ggplot() + aes(x=tsne[, 1], y=tsne[, 2], color=sigScores) + geom_point()
+```
+
+For more details on accessing computed data within the VISION object, see the [References](https://yoseflab.github.io/VISION/reference/index.html) page.
+
+## Customizing the Latent Space
+
+VISION requires a latent space to model the similarity between cells (used to determine a cell's local neighborhood).
+
+By default, this is calculated via PCA on a subset of the genes.  A few arguments control this process:
+
+- `projection_genes` - controls how genes are selected for PCA.  Options are:
+    - `"threshold"` - use a threshold to select genes.  The `threshold` argument specifies either the number or proportion of genes in which a cell must be expressed to be included.
+    - `"fano"` - first the "threshold" filter is applied.  Then genes are ordered by mean expression into 30 bins and within each bin, genes with a high Fano factor (2 MAD above the median) are retained
+    - character vector of gene names - specify the genes to use directly
+
+### Specifying a Custom Latent Space
+
+Alternately, if a latent space has been computed elsewhere (either via PCA, or other factor analysis methods such as [ZIFA](https://github.com/epierson9/ZIFA), [ZINB-WaVE](https://github.com/drisso/zinbwave) or [scVI](https://github.com/YosefLab/scVI)) it can be provided via the `latentSpace` argument as a data frame.
+
+## Micropooling
+
+scRNA-seq experiments have grown in size over the past couple of years, and as such we have provided an algorithm for pooling together similar cells and continuing with analysis, thus reducing the cell-wise time complexity of the VISION pipeline. For more information, please see our micropooling vignette.
+
+You can control the parameters of the micropooling algorithm using two arguments:
+
+- `pool` - boolean specifying whether or not to apply micropooling.  By default this is set to 'auto' and micropooling is run when the number of cells exceeds 15,000.
+- `cellsPerPartition` - integer specifying the target number of cells per micropool.
+
+
+## Adding 2d Projections
+
+Two-dimensional projections are used to visualize the data in the output report.
+
+By default, VISION computes tSNE on the latent space for visualization.  However, other options are availabled via the `projection_methods` argument.
+
+Often times, users will have pre-computed projections that they would like to use for visualizing their data (e.g. a pre-computed tSNE, or UMAP projection). In this case, the `addProjection()` method can be used to add this view of the data to the output report.
+
+```{r, collapse=T, message=F, results=F, eval=F}
+projection <- read.csv("umap_results.csv")
+
+# projection is a matirx or data.frame of dimension (Cells x 2)
+
+vis <- addProjection(vis, "UMAP", projection)
+```
+
+## Hotspot analysis
+As of version 3.0.0, we have enabled users to perform de-novo gene module identification [Hotspot](https://www.cell.com/cell-systems/fulltext/S2405-4712(21)00114-9) (DeTomaso and Yosef, _Cell Systems_ 2021) from within VISION.
+
+As described in the original Hotspot vignette, we'll use the `danb` model for standard single-cell RNA-seq datasets. While this works in general, pay special attention to characteristics of your data (e.g., in spatial examples where capture is low, we recommend using the `bernoulli` model).
+```{r hotspot, eval=F}
+vis@params$latentSpace$projectionGenes <- rownames(vis@exprData) # Use all genes.
+vis <- runHotspot(vis, model="danb", num_umi=meta["num_umi"], logdata=FALSE)
+```
+
+For more information about the analysis pipeline & Hotspot API, you can refer the documentation website [here](https://yoseflab.github.io/Hotspot/index.html) and [the PhyloVision vignette](phyloVision.html).
+
+
+## Reproducing a plot from an interactive report
+
+As of version 3.0.0, we have enabled users to save the relevant information from an interactive report to reproduce in R. This can be accomplished by downloading the "state" of the report using the `Download` button below "Save Report Info" in the upper right of the interactive web-based report. Below, we provide an example workflow of doing this.
+
+Clicking `Download` will download three files: (1) a DE cache; (2) a cache for selections; and (3) a json file containing the current projection, values being plotted, and selected cells. If you would like to view the state on the UI, you may read in the first two objects into VISION and launch the report again:
+
+```{r, collapse=T, message=F, results=F, eval=F}
+vis_new <- load_de_cache(vis, "de_cache_download_path")
+vis_new <- load_selections(vis_new, "selections_download_path")
+viewResults(vis_new, ...)
+```
+
+Else, if you would like to reproduce the plot in R, you can use the third output. This json object contains 5 pieces of information that are useful for reproducing plots:
+
+- The name of the item being plotted (e.g. the signature name; under `item_key`)
+- The values of the item for each cell (under `values`)
+- The 2D embedding of each cell (under `projection`)
+- The name of the embedding dimensions (under `projection_keyX` and `projection_keyY`)
+- The set of cells that are selected.
+
+Below is an example function that will reproduce the visualization in ggplot2. Be sure to have `ggplot2`, `jsonlite`, and `viridis` (for coloring) installed:
+
+```{r, eval=F}
+install.packages('ggplot2')
+install.packages('viridis')
+install.packages('jsonlite')
+```
+
+```{r, collapse=T, message=F, results=F, eval=F}
+plot_saved_state <- function(json_file_path) {
+  library(jsonlite)
+  library(viridis)
+  library(ggplot2)
+  
+  vision_state <- read_json(json_file_path)
+  
+  # extract meaningful info
+  value_name <- vision_state$item_key
+  scatter <- vision_state$projection
+  values <- vision_state$values
+  selection <- vision_state$selected_cells
+  x_name <- vision_state$projection_keyX[[2]]
+  y_name <- vision_state$projection_keyY[[2]]
+  
+  embedding <- data.frame(dim1=unlist(lapply(scatter, function(x) x[[1]])),
+                          dim2=unlist(lapply(scatter, function(x) x[[2]])),
+                          vals=unlist(values))
+  
+  if (length(selection) > 0) {
+    selected_cells = (rownames(embedding) %in% selection)
+    g <- ggplot() +
+      geom_point(data=embedding[!selected_cells,],
+                 aes(x = dim1, y = dim2, color=vals), 
+                 stroke = 0.5, shape=16, alpha = .5) +
+      geom_point(data=embedding[selected_cells,],
+                 aes(x=dim1, y=dim2, color=vals), size=1.6)
+  } else {
+    g <- ggplot() +
+      geom_point(data=embedding, aes(x=dim1, y=dim2, color=vals))
+  }
+  
+  if (is.numeric(embedding$vals)) {
+    g <- g + scale_colour_viridis()
+  } else {
+    g <- g + scale_colour_discrete()
+  }
+  
+  g <- g + 
+    labs(colour=value_name, x=x_name, y=y_name, title=value_name)
+  
+  return(g)
+}
+
+saved_state_file <- '/path/to/saved_scatter.json'
+plot_saved_state(saved_state_file)
+```
+

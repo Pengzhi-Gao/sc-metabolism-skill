@@ -1,0 +1,500 @@
+#' @title Run STdeconvolve reference-free spatial deconvolution
+#'
+#' @description
+#' Infer expression topics and their spot-level proportions using STdeconvolve.
+#'
+#' @md
+#' @inheritParams scop-params
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A `Seurat` object containing spatial expression data.
+#' @param assay Assay used as STdeconvolve input. If `NULL`, the default assay
+#' is used.
+#' @param layer Assay layer used as STdeconvolve input.
+#' @param features Features passed to the topic model. If `NULL`, all features
+#' in the selected assay are used.
+#' @param k Number of topics. If `NULL`, models are fit over `k_candidates` and
+#' `STdeconvolve::optimalModel()` is used to choose a model.
+#' @param k_candidates Candidate topic numbers used when `k = NULL`.
+#' @param opt Optimal model selector passed to `STdeconvolve::optimalModel()`.
+#' @param clean_counts Whether to call `STdeconvolve::cleanCounts()`.
+#' @param clean_counts_params Additional parameters passed to
+#' `STdeconvolve::cleanCounts()`.
+#' @param restrict_corpus Whether to call `STdeconvolve::restrictCorpus()`.
+#' @param restrict_corpus_params Additional parameters passed to
+#' `STdeconvolve::restrictCorpus()`.
+#' @param fit_lda_params Additional parameters passed to
+#' `STdeconvolve::fitLDA()`.
+#' @param get_beta_theta_params Additional parameters passed to
+#' `STdeconvolve::getBetaTheta()`.
+#' @param tool_name Name used to store detailed results in `srt@tools`.
+#' @param prefix Prefix for topic proportion metadata columns.
+#' @param store_results Whether to store detailed topic matrices in `srt@tools`.
+#' @param round_counts Whether to round non-integer counts before model fitting.
+#' This is a preprocessing choice and does not recover original counts.
+#' @param ... Additional arguments passed to the STdeconvolve fit steps.
+#'
+#' @return A `Seurat` object with topic proportions in metadata and detailed
+#' results stored in `srt@tools[[tool_name]]` when `store_results = TRUE`.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' data(visium_human_pancreas_sub)
+#' spatial <- visium_human_pancreas_sub
+#' counts <- GetAssayData5(spatial, assay = "Spatial", layer = "counts")
+#' features <- names(sort(Matrix::rowSums(counts), decreasing = TRUE))[
+#'   seq_len(min(300L, nrow(counts)))
+#' ]
+#' spatial <- RunSTdeconvolve(
+#'   spatial,
+#'   assay = "Spatial",
+#'   layer = "counts",
+#'   features = features,
+#'   k = 3,
+#'   verbose = FALSE
+#' )
+#' STdeconvolvePlot(
+#'   spatial,
+#'   topics = 1L,
+#'   overlay_image = FALSE,
+#'   coord.cols = c("x", "y")
+#' )
+#' }
+RunSTdeconvolve <- function(
+  object,
+  assay = NULL,
+  layer = "counts",
+  features = NULL,
+  k = NULL,
+  k_candidates = 2:9,
+  opt = "min",
+  clean_counts = TRUE,
+  clean_counts_params = list(),
+  restrict_corpus = TRUE,
+  restrict_corpus_params = list(),
+  fit_lda_params = list(),
+  get_beta_theta_params = list(),
+  prefix = "STdeconvolve",
+  tool_name = "STdeconvolve",
+  store_results = TRUE,
+  round_counts = TRUE,
+  verbose = TRUE,
+  ...,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  validate_scalar_string(prefix, "prefix", require_character = FALSE)
+  validate_scalar_string(tool_name, "tool_name", require_character = FALSE)
+  validate_named_param_list(clean_counts_params, "clean_counts_params", require_list = TRUE)
+  validate_named_param_list(restrict_corpus_params, "restrict_corpus_params", require_list = TRUE)
+  validate_named_param_list(fit_lda_params, "fit_lda_params", require_list = TRUE)
+  validate_named_param_list(get_beta_theta_params, "get_beta_theta_params", require_list = TRUE)
+
+  assay <- assay %||% SeuratObject::DefaultAssay(srt)
+  features_use <- features %||% rownames(srt[[assay]])
+  features_use <- intersect(features_use, rownames(srt[[assay]]))
+  if (length(features_use) == 0L) {
+    log_message(
+      "No features are available for {.fn RunSTdeconvolve}",
+      message_type = "error"
+    )
+  }
+
+  counts <- rctd_get_count_matrix(
+    srt,
+    assay = assay,
+    layer = layer,
+    features = features_use,
+    data_label = "Spatial",
+    round_counts = round_counts,
+    verbose = verbose
+  )
+  counts <- stdeconvolve_filter_counts(counts)
+  if (nrow(counts) == 0L || ncol(counts) == 0L) {
+    log_message(
+      "No non-zero features or spots remain for {.fn RunSTdeconvolve}",
+      message_type = "error"
+    )
+  }
+
+  extra_fit_params <- list(...)
+  if (length(extra_fit_params) > 0L) {
+    validate_named_param_list(extra_fit_params, "...", require_list = TRUE)
+    fit_lda_params <- c(fit_lda_params, extra_fit_params)
+  }
+  topic_k <- stdeconvolve_resolve_k(k = k, k_candidates = k_candidates)
+
+  log_message(
+    "Run {.pkg STdeconvolve} with {.val {nrow(counts)}} features and {.val {ncol(counts)}} spatial spots",
+    verbose = verbose
+  )
+  backend <- stdeconvolve_run_backend(
+    counts = counts,
+    k = topic_k,
+    opt = opt,
+    clean_counts = clean_counts,
+    clean_counts_params = clean_counts_params,
+    restrict_corpus = restrict_corpus,
+    restrict_corpus_params = restrict_corpus_params,
+    fit_lda_params = fit_lda_params,
+    get_beta_theta_params = get_beta_theta_params
+  )
+
+  theta <- stdeconvolve_orient_theta(backend$theta, spot_ids = colnames(counts))
+  colnames(theta) <- make.unique(make.names(colnames(theta)), sep = "_")
+  weight_summary <- spatial_finalize_weights(
+    weights = theta,
+    all_spots = colnames(srt)
+  )
+  theta <- weight_summary$full_weights
+  srt <- spatial_add_deconv_metadata(
+    srt,
+    weights = theta,
+    prefix = prefix,
+    metadata = weight_summary
+  )
+
+  if (isTRUE(store_results)) {
+    srt@tools[[tool_name]] <- list(
+      theta = theta,
+      beta = backend$beta,
+      corpus = backend$corpus,
+      model = backend$model,
+      models = backend$models,
+      selected_k = backend$selected_k,
+      features = rownames(counts),
+      summary = spatial_weight_summary(theta),
+      parameters = list(
+        assay = assay,
+        layer = layer,
+        k = k,
+        k_candidates = k_candidates,
+        opt = opt,
+        clean_counts = clean_counts,
+        clean_counts_params = clean_counts_params,
+        restrict_corpus = restrict_corpus,
+        restrict_corpus_params = restrict_corpus_params,
+        fit_lda_params = fit_lda_params,
+        get_beta_theta_params = get_beta_theta_params,
+        prefix = prefix,
+        tool_name = tool_name,
+        round_counts = round_counts
+      )
+    )
+  }
+
+  log_message(
+    "{.pkg STdeconvolve} topic proportions stored in metadata columns with prefix {.val {prefix}_prop_}",
+    verbose = verbose
+  )
+  srt
+}
+
+#' @title Plot STdeconvolve topic proportions
+#'
+#' @description
+#' Plot stored topic proportions without rerunning the optional backend.
+#' Multi-topic point maps use one shared proportion scale and reserve title
+#' space above the automatic layout.
+#'
+#' @md
+#' @inheritParams SpatialSpotPlot
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A `Seurat` object.
+#' @param topics Topic names, topic numbers, or metadata columns to plot. If
+#' `NULL`, all topics in the stored result are used.
+#' @param tool_name Result key written to `srt@tools` by
+#' `RunSTdeconvolve()`.
+#' @param prefix Metadata prefix used by `RunSTdeconvolve()`. If `NULL`, the
+#' prefix is read from the stored result.
+#' @param combine Whether to combine point plots. If `FALSE`, a named list of
+#' plots is returned.
+#' @param nrow,ncol,byrow Point-plot layout controls. When both `nrow` and
+#' `ncol` are `NULL`, a near-square layout with at most three columns is used.
+#' @param ... Additional arguments passed to `SpatialSpotPlot()`.
+#'
+#' @return A `ggplot`, `patchwork`, or list of `ggplot` objects.
+#' @seealso [RunSTdeconvolve()]
+#' @export
+#'
+STdeconvolvePlot <- function(
+  object,
+  tool_name = "STdeconvolve",
+  topics = NULL,
+  prefix = NULL,
+  plot_type = c("point", "pie"),
+  combine = TRUE,
+  nrow = NULL,
+  ncol = NULL,
+  byrow = TRUE,
+  ...,
+  image.scale = c("lowres", "hires"),
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  if (!inherits(srt, "Seurat")) {
+    log_message("{.arg srt} must be a {.cls Seurat} object", message_type = "error")
+  }
+  validate_scalar_string(tool_name, "tool_name", require_character = FALSE)
+  plot_type <- match.arg(plot_type)
+  image.scale <- match.arg(image.scale)
+  stored <- srt@tools[[tool_name]]
+  if (!is.list(stored)) {
+    log_message(
+      "Stored result {.val {tool_name}} was not produced by {.fn RunSTdeconvolve}",
+      message_type = "error"
+    )
+  }
+  prefix <- prefix %||% stored$parameters$prefix
+  validate_scalar_string(prefix, "prefix", require_character = FALSE)
+  theta <- stdeconvolve_plot_theta(
+    theta = stored$theta,
+    spot_ids = colnames(srt),
+    tool_name = tool_name
+  )
+  topic_names <- stdeconvolve_resolve_plot_topics(
+    topics = topics,
+    topic_names = colnames(theta),
+    prefix = prefix
+  )
+  values <- theta[, topic_names, drop = FALSE]
+  colnames(values) <- paste0(prefix, "_prop_", make.names(topic_names))
+  if (identical(plot_type, "pie")) {
+    return(SpatialSpotPlot(
+      srt,
+      values = values,
+      plot_type = "pie",
+      image.scale = image.scale,
+      ...
+    ))
+  }
+  dots <- list(...)
+  spatial_matrix_point_plot(
+    srt = srt,
+    values = values,
+    value_names = topic_names,
+    value_kind = "topic-proportion",
+    legend_title = dots$legend.title,
+    plot_title = paste0(tool_name, " topic proportions"),
+    combine = combine,
+    nrow = nrow,
+    ncol = ncol,
+    byrow = byrow,
+    plot_args = c(
+      list(image.scale = image.scale),
+      dots
+    )
+  )
+}
+
+
+stdeconvolve_plot_theta <- function(theta, spot_ids, tool_name) {
+  if (is.null(theta) || (!is.matrix(theta) && !inherits(theta, "Matrix"))) {
+    log_message(
+      "Stored result {.val {tool_name}} does not contain a matrix-like {.val theta}",
+      message_type = "error"
+    )
+  }
+  theta <- as.matrix(theta)
+  if (nrow(theta) == 0L || ncol(theta) == 0L) {
+    log_message("Stored {.val theta} is empty", message_type = "error")
+  }
+  if (
+    is.null(rownames(theta)) || anyNA(rownames(theta)) ||
+      any(!nzchar(rownames(theta))) || anyDuplicated(rownames(theta))
+  ) {
+    log_message(
+      "Stored {.val theta} must have unique, non-missing spatial spot names",
+      message_type = "error"
+    )
+  }
+  if (
+    is.null(colnames(theta)) || anyNA(colnames(theta)) ||
+      any(!nzchar(colnames(theta))) || anyDuplicated(colnames(theta))
+  ) {
+    log_message(
+      "Stored {.val theta} must have unique, non-missing topic names",
+      message_type = "error"
+    )
+  }
+  missing_spots <- setdiff(spot_ids, rownames(theta))
+  extra_spots <- setdiff(rownames(theta), spot_ids)
+  if (length(missing_spots) > 0L || length(extra_spots) > 0L) {
+    log_message(
+      "Stored {.val theta} spot identities are stale or incomplete: {.val {length(missing_spots)}} missing and {.val {length(extra_spots)}} unknown",
+      message_type = "error"
+    )
+  }
+  theta[spot_ids, , drop = FALSE]
+}
+
+stdeconvolve_resolve_plot_topics <- function(topics, topic_names, prefix) {
+  if (is.null(topics)) {
+    return(topic_names)
+  }
+  topics_chr <- as.character(topics)
+  out <- vapply(topics_chr, function(topic) {
+    if (topic %in% topic_names) {
+      return(topic)
+    }
+    if (grepl("^[0-9]+$", topic)) {
+      idx <- as.integer(topic)
+      if (idx >= 1L && idx <= length(topic_names)) {
+        return(topic_names[[idx]])
+      }
+    }
+    prefix_value <- paste0(prefix, "_prop_", make.names(topic_names))
+    hit <- match(topic, prefix_value)
+    if (!is.na(hit)) {
+      return(topic_names[[hit]])
+    }
+    NA_character_
+  }, character(1))
+  if (anyNA(out)) {
+    log_message(
+      "Requested {.arg topics} were not found: {.val {topics_chr[is.na(out)]}}",
+      message_type = "error"
+    )
+  }
+  unname(out)
+}
+
+stdeconvolve_run_backend <- function(
+  counts,
+  k,
+  opt,
+  clean_counts,
+  clean_counts_params,
+  restrict_corpus,
+  restrict_corpus_params,
+  fit_lda_params,
+  get_beta_theta_params
+) {
+  check_r("JEFworks-Lab/STdeconvolve", verbose = FALSE)
+  clean_counts_fun <- get_namespace_fun("STdeconvolve", "cleanCounts")
+  restrict_fun <- get_namespace_fun("STdeconvolve", "restrictCorpus")
+  fit_lda <- get_namespace_fun("STdeconvolve", "fitLDA")
+  optimal_model <- get_namespace_fun("STdeconvolve", "optimalModel")
+  get_beta_theta <- get_namespace_fun("STdeconvolve", "getBetaTheta")
+
+  corpus <- counts
+  if (isTRUE(clean_counts)) {
+    corpus <- do.call(clean_counts_fun, c(list(counts = corpus), clean_counts_params))
+  }
+  if (isTRUE(restrict_corpus)) {
+    corpus <- do.call(restrict_fun, c(list(counts = corpus), restrict_corpus_params))
+  }
+  corpus_mat <- stdeconvolve_extract_corpus(corpus)
+  corpus_mat <- corpus_mat[, Matrix::colSums(corpus_mat) > 0, drop = FALSE]
+  if (nrow(corpus_mat) == 0L || ncol(corpus_mat) == 0L) {
+    log_message(
+      "{.pkg STdeconvolve} corpus is empty after preprocessing",
+      message_type = "error"
+    )
+  }
+
+  lda_input <- t(as.matrix(corpus_mat))
+  models <- do.call(fit_lda, c(list(counts = lda_input, Ks = k), fit_lda_params))
+  model <- do.call(optimal_model, list(models = models, opt = opt))
+  result <- do.call(get_beta_theta, c(list(lda = model), get_beta_theta_params))
+  stdeconvolve_extract_result(
+    result = result,
+    model = model,
+    models = models,
+    corpus = corpus_mat,
+    requested_k = k
+  )
+}
+
+stdeconvolve_extract_result <- function(result, model, models, corpus, requested_k) {
+  theta <- result$theta %||% result$Theta %||% result$deconProp
+  beta <- result$beta %||% result$Beta %||% result$geneExpr
+  if (is.null(theta)) {
+    log_message(
+      "{.pkg STdeconvolve} did not return topic proportion matrix {.val theta}",
+      message_type = "error"
+    )
+  }
+  selected_k <- ncol(as.matrix(theta))
+  if (length(requested_k) == 1L) {
+    selected_k <- requested_k
+  }
+  list(
+    theta = theta,
+    beta = beta,
+    corpus = corpus,
+    model = model,
+    models = models,
+    selected_k = selected_k
+  )
+}
+
+stdeconvolve_extract_corpus <- function(corpus) {
+  if (is.list(corpus) && !is.null(corpus$corpus)) {
+    corpus <- corpus$corpus
+  }
+  if (is.data.frame(corpus)) {
+    corpus <- as.matrix(corpus)
+  }
+  if (!is.matrix(corpus) && !inherits(corpus, "Matrix")) {
+    log_message(
+      "{.pkg STdeconvolve} corpus must be a matrix-like object",
+      message_type = "error"
+    )
+  }
+  corpus
+}
+
+stdeconvolve_filter_counts <- function(counts) {
+  counts <- methods::as(counts, "dgCMatrix")
+  keep_features <- Matrix::rowSums(counts) > 0
+  keep_spots <- Matrix::colSums(counts) > 0
+  counts[keep_features, keep_spots, drop = FALSE]
+}
+
+stdeconvolve_orient_theta <- function(theta, spot_ids) {
+  theta <- as.matrix(theta)
+  rn_match <- if (is.null(rownames(theta))) 0L else sum(rownames(theta) %in% spot_ids)
+  cn_match <- if (is.null(colnames(theta))) 0L else sum(colnames(theta) %in% spot_ids)
+  if (cn_match > rn_match) {
+    theta <- t(theta)
+  }
+  if (is.null(rownames(theta))) {
+    log_message(
+      "{.pkg STdeconvolve} topic proportions must contain spatial spot names",
+      message_type = "error"
+    )
+  }
+  spots_use <- spot_ids[spot_ids %in% rownames(theta)]
+  if (length(spots_use) == 0L) {
+    log_message(
+      "{.pkg STdeconvolve} topic proportions could not be matched to spatial spot names",
+      message_type = "error"
+    )
+  }
+  theta <- theta[spots_use, , drop = FALSE]
+  if (is.null(colnames(theta)) || any(!nzchar(colnames(theta)))) {
+    colnames(theta) <- paste0("topic_", seq_len(ncol(theta)))
+  }
+  colnames(theta) <- make.unique(as.character(colnames(theta)), sep = "_")
+  theta
+}
+
+stdeconvolve_resolve_k <- function(k = NULL, k_candidates = 2:9) {
+  k_use <- k %||% k_candidates
+  if (!is.numeric(k_use) || length(k_use) == 0L || any(is.na(k_use) | k_use < 2)) {
+    log_message(
+      "{.arg k} or {.arg k_candidates} must contain topic numbers >= 2",
+      message_type = "error"
+    )
+  }
+  unique(as.integer(k_use))
+}

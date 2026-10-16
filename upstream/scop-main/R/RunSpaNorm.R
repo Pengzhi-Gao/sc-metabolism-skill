@@ -1,0 +1,290 @@
+#' @title Run SpaNorm spatial normalization
+#'
+#' @description
+#' Normalize spatial transcriptomics counts using SpaNorm and store the
+#' normalized expression in a Seurat assay.
+#'
+#' @md
+#' @inheritParams RunSpatialVariableFeatures
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A `Seurat` object.
+#' @inheritParams thisutils::log_message
+#' @param new_assay Name of the assay used to store SpaNorm-normalized data.
+#' @param tool_name Name used to store detailed SpaNorm results in `srt@tools`.
+#' @param store_spe Whether to store the backend `SpatialExperiment` returned
+#' by `SpaNorm`.
+#' @param coordinate_space Coordinate system supplied to SpaNorm. The default
+#' is raw acquisition coordinates; use `"legacy_display"` explicitly to
+#' reproduce the display-scaled coordinates used before scop 0.9.0.
+#' @param ... Additional arguments passed to `SpaNorm::SpaNorm()`, such as
+#' `sample.p`.
+#'
+#' @return A `Seurat` object with SpaNorm-normalized expression stored in
+#' `new_assay`. When `store_results = TRUE`, parameters, coordinates, features,
+#' cells, and optional backend output are stored in `srt@tools[[tool_name]]`.
+#' @export
+#'
+#' @examples
+#' data(visium_human_pancreas_sub)
+#' keep_spots <- unique(round(seq(
+#'   1,
+#'   ncol(visium_human_pancreas_sub),
+#'   length.out = 300
+#' )))
+#' spatial <- visium_human_pancreas_sub[, keep_spots]
+#' spatial <- RunSpaNorm(
+#'   spatial,
+#'   assay = "Spatial",
+#'   layer = "counts",
+#'   coord.cols = c("x", "y"),
+#'   new_assay = "SpaNorm",
+#'   store_spe = FALSE,
+#'   sample.p = 0.5,
+#'   verbose = FALSE
+#' )
+#' SpatialSpotPlot(
+#'   spatial,
+#'   features = rownames(spatial[["SpaNorm"]])[1],
+#'   assay = "SpaNorm",
+#'   layer = "data",
+#'   overlay_image = FALSE,
+#'   coord.cols = c("x", "y")
+#' )
+RunSpaNorm <- function(
+  object,
+  assay = NULL,
+  layer = "counts",
+  image = NULL,
+  coord.cols = c("col", "row"),
+  new_assay = "SpaNorm",
+  tool_name = "SpaNorm",
+  store_results = TRUE,
+  store_spe = FALSE,
+  verbose = TRUE,
+  coordinate_space = c("raw", "legacy_display"),
+  ...,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  coordinate_space <- match.arg(coordinate_space)
+  log_message(
+    "Running SpaNorm spatial normalization",
+    message_type = "running",
+    verbose = verbose
+  )
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  validate_scalar_string(new_assay, "new_assay", require_character = FALSE)
+  validate_scalar_string(tool_name, "tool_name", require_character = FALSE)
+  validate_scalar_flag(store_results, "store_results")
+  validate_scalar_flag(store_spe, "store_spe")
+
+  assay <- assay %||% SeuratObject::DefaultAssay(srt)
+  if (!assay %in% SeuratObject::Assays(srt)) {
+    log_message(
+      "{.arg assay} {.val {assay}} is not present in {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+
+  input <- spanorm_prepare_input(
+    srt = srt,
+    assay = assay,
+    layer = layer,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space
+  )
+  backend_args <- list(...)
+  spanorm_validate_named_args(backend_args)
+
+  spe <- spanorm_make_spe(
+    counts = input$counts,
+    coords = input$coords
+  )
+  log_message(
+    "Run {.pkg SpaNorm} with {.val {nrow(input$counts)}} features and {.val {ncol(input$counts)}} spots",
+    verbose = verbose
+  )
+  result <- spanorm_run_backend(spe, backend_args)
+  normalized <- spanorm_extract_logcounts(
+    result = result,
+    features = rownames(input$counts),
+    cells = colnames(input$counts)
+  )
+  suppressWarnings(
+    srt[[new_assay]] <- SeuratObject::CreateAssayObject(data = normalized)
+  )
+
+  if (isTRUE(store_results)) {
+    tool <- list(
+      parameters = list(
+        assay = assay,
+        layer = layer,
+        image = image,
+        coord.cols = coord.cols,
+        coordinate_space = coordinate_space,
+        new_assay = new_assay,
+        tool_name = tool_name,
+        store_results = store_results,
+        store_spe = store_spe,
+        backend_args = backend_args
+      ),
+      coords = input$coords,
+      features = rownames(input$counts),
+      cells = colnames(input$counts)
+    )
+    if (isTRUE(store_spe)) {
+      tool$spe <- result
+    }
+    srt@tools[[tool_name]] <- spatial_tag_coordinate_contract(tool)
+  }
+
+  log_message(
+    "{.pkg SpaNorm} normalized expression stored in assay {.val {new_assay}}",
+    message_type = "success",
+    verbose = verbose
+  )
+  srt
+}
+
+spanorm_prepare_input <- function(
+  srt,
+  assay,
+  layer,
+  image = NULL,
+  coord.cols = c("col", "row"),
+  coordinate_space = c("raw", "legacy_display")
+) {
+  coords <- spatial_analysis_coords(
+    srt = srt,
+    image = image,
+    coord.cols = coord.cols,
+    coordinate_space = coordinate_space
+  )$data
+  cells <- colnames(srt)[colnames(srt) %in% rownames(coords)]
+  if (length(cells) == 0L) {
+    log_message(
+      "No spatial coordinates match spots in {.arg srt}",
+      message_type = "error"
+    )
+  }
+  coords <- coords[cells, , drop = FALSE]
+  keep <- is.finite(coords$x) & is.finite(coords$y)
+  if (!all(keep)) {
+    cells <- cells[keep]
+    coords <- coords[cells, , drop = FALSE]
+  }
+  if (length(cells) < 3L) {
+    log_message(
+      "At least three spots with finite coordinates are required for {.fn RunSpaNorm}",
+      message_type = "error"
+    )
+  }
+
+  counts <- GetAssayData5(srt, assay = assay, layer = layer)
+  counts <- counts[, cells, drop = FALSE]
+  if (!inherits(counts, "Matrix")) {
+    counts <- Matrix::Matrix(
+      if (is.data.frame(counts)) as.matrix(counts) else counts,
+      sparse = TRUE
+    )
+  }
+  if (!inherits(counts, "dgCMatrix")) {
+    counts <- methods::as(counts, "CsparseMatrix")
+  }
+  if (!inherits(counts, "dgCMatrix")) {
+    counts <- methods::as(counts, "dgCMatrix")
+  }
+  if (any(!is.finite(counts@x) | counts@x < 0 | counts@x %% 1 != 0)) {
+    log_message(
+      "SpaNorm counts must contain only finite, non-negative integer values",
+      message_type = "error"
+    )
+  }
+  counts <- Matrix::drop0(counts)
+  if (nrow(counts) == 0L || ncol(counts) == 0L) {
+    log_message(
+      "Input expression matrix is empty after coordinate matching",
+      message_type = "error"
+    )
+  }
+  list(counts = counts, coords = coords)
+}
+
+spanorm_make_spe <- function(counts, coords) {
+  check_r(c("SpatialExperiment", "SummarizedExperiment", "S4Vectors"), verbose = FALSE)
+  spatial_experiment <- get_namespace_fun("SpatialExperiment", "SpatialExperiment")
+  spatial_experiment(
+    assays = list(counts = counts),
+    spatialCoords = as.matrix(coords[, c("x", "y"), drop = FALSE])
+  )
+}
+
+spanorm_run_backend <- function(spe, backend_args = list()) {
+  check_r("SpaNorm", verbose = FALSE)
+  spanorm_fun <- get_namespace_fun("SpaNorm", "SpaNorm")
+  do.call(spanorm_fun, c(list(spe), backend_args))
+}
+
+spanorm_extract_logcounts <- function(result, features, cells) {
+  if (!methods::is(result, "SummarizedExperiment")) {
+    log_message(
+      "{.pkg SpaNorm} must return a {.cls SpatialExperiment} or {.cls SummarizedExperiment} object",
+      message_type = "error"
+    )
+  }
+  assay_names <- SummarizedExperiment::assayNames(result)
+  if (!"logcounts" %in% assay_names) {
+    log_message(
+      "{.pkg SpaNorm} result does not contain a {.val logcounts} assay",
+      message_type = "error"
+    )
+  }
+  mat <- SummarizedExperiment::assay(result, "logcounts")
+  if (!inherits(mat, "Matrix")) {
+    mat <- Matrix::Matrix(
+      if (is.data.frame(mat)) as.matrix(mat) else mat,
+      sparse = TRUE
+    )
+  }
+  if (!inherits(mat, "dgCMatrix")) {
+    mat <- methods::as(mat, "CsparseMatrix")
+  }
+  if (!inherits(mat, "dgCMatrix")) {
+    mat <- methods::as(mat, "dgCMatrix")
+  }
+  if (is.null(rownames(mat))) {
+    rownames(mat) <- features
+  }
+  if (is.null(colnames(mat))) {
+    colnames(mat) <- cells
+  }
+  if (!all(features %in% rownames(mat)) || !all(cells %in% colnames(mat))) {
+    log_message(
+      "{.pkg SpaNorm} logcounts could not be matched to input features and spots",
+      message_type = "error"
+    )
+  }
+  mat[features, cells, drop = FALSE]
+}
+
+
+spanorm_validate_named_args <- function(x) {
+  if (length(x) == 0L) {
+    return(invisible(TRUE))
+  }
+  nms <- names(x)
+  if (is.null(nms) || any(is.na(nms) | !nzchar(nms))) {
+    log_message(
+      "{.arg ...} must contain named arguments only",
+      message_type = "error"
+    )
+  }
+  invisible(TRUE)
+}

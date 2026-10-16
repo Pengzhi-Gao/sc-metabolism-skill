@@ -1,0 +1,11 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.travis\.yml$
+^build_whitelist.sh$
+^build_site.sh$
+^docs/.*$
+^vignettes/web_only/.*$
+^.*.eslintrc.json
+^_pkgdown\.yml$
+^docs$
+^pkgdown$

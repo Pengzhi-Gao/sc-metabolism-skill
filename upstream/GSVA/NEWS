@@ -1,0 +1,270 @@
+CHANGES IN VERSION 2.6
+----------------------
+
+USER VISIBLE CHANGES
+
+  o Performance improvement in the calculation of GSVA scores from ranks.
+
+  o Replaced trend=gssizes by trend=sqrt(gssizes) in the vignette that illustrates the limma-trend pipeline with GSVA scores.
+
+  o Added support for ssGSEA, PLAGE and Z-score to work with large datasets stored using a DelayedArray backend, such as HDF5.
+
+  o Moving from scuttle/scran used in the single-cell vignette to scrapper/bluster to fix deprecation warnings.
+
+  o *Param() functions report more informative errors when the input expression data or gene sets do not correspond to one of the expected object classes.
+
+  o Added new functions saveHDF5GSVAranks() and loadHDF5GSVAranks() to first save on disk the output of the gsvaRanks() function, and second, load that output from disk to callthe gsvaScores() function with it.
+
+  o Improved unit test coverage to > 85%.
+
+  o Added a vignette on how to use GSVA on proteomics data with missing values.
+
+BUG FIXES
+
+  o Fix on the handing of missing data with the GSVA method. Bug reported in issue #257.
+
+  o Fix on the propagation of NA values with the GSVA method.
+
+  o Fix in detecting rows with constant (nonzero) values.
+
+  o Fix in kcdf="Gaussian" when input is SparseArray.
+
+  o Fix in fetching rows from SVT_SparseArray matrices.
+
+  o Fix on handling NaN values, which were causing a core dump, they are now treated as NA values. Bug reported in issue #258.
+
+  o Removed non-API calls from C code.
+
+  o Code reorganization and multiple improvements and vulnerability fixes.
+
+CHANGES IN VERSION 2.4
+----------------------
+
+USER VISIBLE CHANGES
+
+  o Input needs not row/feature/gene names in the expression data anymore, and gene sets can be directly integer values indexing rows in the expression data. This is mostly useful for quick testing purposes.
+
+  o gsvaEnrichment(plot="ggplot") outputs now ggplot2 4.0 compliant plots.
+
+  o Input (sparse) expression data for the GSVA method can be now also provided as a SVT_SparseMatrix object, defined in the SparseArray package, either directly or within a SingleCellExperiment object. This allows for analysing single-cell data sets with more than 2^31 nonzero values.
+
+  o Input expression data for the GSVA method can be now also provided as a DelayedArray matrix storing the values using an HDF5 on-disk backend, either directly or within a SingleCellExperiment object.
+
+  o Added a new vignette illustrating the use of the GSVA method with single-cell RNA-seq data.
+
+CHANGES IN VERSION 2.2
+----------------------
+
+USER VISIBLE CHANGES
+
+  o When the input expression data is provided as either a 'SummarizedExperiment', 'SingleCellExperiment' or a 'SpatialExperiment' object, the default assay is now either one called 'logcounts' or the first one, otherwise.
+
+  o Added a method called 'spatCor()' to efficiently compute spatial autocorrelation using Moran's I statistic for an input 'SpatialExperiment' object, using an inverse squared distance weight matrix as default, or an inverse distance weight matrix as an alternative. It also tests for spatial autocorrelation assuming normality. This functionality is added to help detecting autocorrelated gene sets using GSVA enrichment scores.
+
+  o After one cycle of deprecation and two cycles of being defunct, the classical non-object-oriented way of calling the function 'gsva()' has been completely removed. Now 'gsva()' can only be used by constructing first a parameter object.
+
+  o Fixed URLs in vignette and DOI refs in documentation.
+
+  o The vignette has been updated with a new section illustrating how to import gene sets from GMT files with the function 'readGMT()' and the section on "Differential expression at pathway level" has been updated using the bulk RNA-seq data from Costa et. al (2021).
+
+BUG FIXES
+
+  o Bugfix in gsvaEnrichment() when input data contains missing values.
+
+  o Bugfix in checking and detecting missing values in input expression data.
+
+  o Bugfix in the PLAGE method when using the argument BPPARAM with a value other than SerialParam(). It resolves issue #220.
+
+  o Bugfix when tau is not double for the GSVA method.
+
+  o Bugfix in the C code to avoid potential memory leaks.
+
+CHANGES IN VERSION 2.0
+----------------------
+
+USER VISIBLE CHANGES
+
+  o Added a missing data policy for the GSVA and the ssGSEA methods by which missing values in the input expression data either propagate throughout calculations (use="everything"), prompt an error (use="all.obs"), or are discarded from calculations (use="na.rm").
+
+  o The readGMT() function now returns also a GeneSetCollection object, and can automatically identify the type of feature/gene identifier used in the GMT file, adding it to the metadata of the return object.
+
+  o Mapping between different types of feature/gene identifiers between gene sets and expression data has been improved.
+
+  o Added a new default for the kcdf parameter in the GSVA method, kcdf='auto', which tries to select the best value for this parameter, according to the input data.
+
+  o Added a new sparse regime of the GSVA algorithm, specifically tailored for expression data stored in sparse matrices, such as single-cell data, to address some of the shortcomings of the original (classical) algorithm with this type of data.
+
+  o Added two new methods, gsvaRanks() and gsvaScores(), to run the GSVA algorithm in two steps that provide additional flexibility to score gene sets and extract enrichment information.
+
+  o Added a new method gsvaEnrichment() to be used after gsvaRanks(), which allows one to extract enrichment information for a particular gene set and sample/column, including the possibility to produce an enrichment plot using base R or ggplot2 graphics.
+
+  o Package messages are now displayed using the cli package, changing and removing some of them, as well as adding other ones, to improve the information reported to the user.
+
+BUG FIXES
+
+  o Removed API legacy convenience features, which keep causing problems, as per request of CRAN maintainers.
+
+  o Fixed some bugs in the shiny app.
+
+CHANGES IN VERSION 1.52
+-----------------------
+
+USER VISIBLE CHANGES
+
+  o Moved old API from deprecated to defunct; see vignette and help pages for examples on how to use the new API.
+
+  o Documentation fixes.
+
+  o Gene/feature filtering is not based anymore on floating point arithmetic, but on comparing minimum and maximum values. In the case of expression data stored in dgCMatrix objects, this criterion applies to non-zero values only.
+
+  o Parameter objects have nicer show methods.
+
+  o Resulting enrichment score matrices are now always dense.
+
+  o Added a first version of the support to SpatialExperiment objects. At the moment, only GSVA scores are calculated without using spatial coordinates information.
+
+  o When expression data is stored in an input sparse matrix of class dgCMatrix, now it is handled as such a sparse matrix as much as possible to reduce memory consumption.
+
+  o Added geneSets() and geneSetSizes() methods that allow one to retrieve, respectively, the filtered collection of gene sets and their sizes from either the parameter object or the resulting object output by the gsva() function. This allows the user to more easily give this information to analysis pipelines that exploit it, such as limma-trend; see the vignette for an example.
+
+  o Added functions readGMT() and deduplicateGeneSets() to read GMT files, handling the case when the file contains gene sets with duplicated names; see the corresponding help pages for more information.
+
+  o The underlying code of the ssGSEA method has been optimized after discussion on https://github.com/rcastelo/GSVA/issues/71 and now it runs one order of magnitude faster and consumes one order of magnitude less memory.
+
+BUG FIXES
+
+  o Bugfix on accessing the assay names of a SingleCellExperiment object from the 'gsva()' function.
+
+  o Bugfix on a rare combination of input parameter for gsvaParam().
+
+CHANGES IN VERSION 1.50
+-----------------------
+
+USER VISIBLE CHANGES
+
+  o The API has changed. The main function remains under the same name 'gsva()', but the way in which is called is different. From this release, it has three parameters only: the first is a parameter object whose class depends on the method to be used, the second is a flag to set verbosity and the third controls the parallelization of the calculations. The old way of using 'gsva()' has been deprecated, which means that during this release, the user may still use the old API, but will get a deprecation warning message. In the next release, the old way of using 'gsva()' will become defunct and prompt an error. Please check the help page of 'gsva()' for details.
+
+BUG FIXES
+
+  o Bugfix for https://github.com/rcastelo/GSVA/issues/88 to correctly deal with a GeneSetCollection object as input gene sets, when the input expression data is a SingleCellExperiment object.
+
+  o Bugfix for https://github.com/rcastelo/GSVA/issues/90 to enable working with long vectors in the calls to C code by the GSVA algorithm.
+
+CHANGES IN VERSION 1.46
+-----------------------
+
+BUG FIXES
+
+   o Bugfix for https://github.com/rcastelo/GSVA/issues/61 to enable using the ssgsea method with one single column (sample) in the input data container.
+
+   o Bugfix when input is a SummarizedExperiment and assays contain a data.frame instead of a matrix.
+
+CHANGES IN VERSION 1.44
+-----------------------
+
+BUG FIXES
+
+   o Bugfix for https://github.com/rcastelo/GSVA/issues/54 to force filtering genes with constant expression behaving the same regardless of the delayed or non-delayed nature of the data container.
+
+CHANGES IN VERSION 1.40
+-----------------------
+
+USER VISIBLE CHANGES
+
+   o The vignette has been rewritten in R Markdown to produce an HTML vignette page and make it shorter and faster to produce.
+
+   o Development of a shiny app available through the function 'igsva()'.
+
+BUG FIXES
+
+   o Replaced fastmatch::fmatch() by IRanges::match,CharacterList-method after disscussion at https://github.com/rcastelo/GSVA/issues/39 to avoid the row names of an input expression matrix being altered by fastmatch::fmatch() adding an attribute.
+
+   o Fixed wrong call to .mapGeneSetsToFeatures() when gene sets are given in a GeneSetCollection object.
+
+CHANGES IN VERSION 1.36
+-----------------------
+
+USER VISIBLE CHANGES
+
+   o Improved management of parallel calculations by using the BiocParallel package. This facilitates calculating GSVA scores from gene expression data matrices with thousands of samples. See arguments 'parallel.sz' and 'BPPARAM' in the manual page of the 'gsva()' function.
+
+   o Improved implementation of the SSGSEA method ('method="ssgsea" in the call to 'gsva()') that makes calculations with this option about one order of magnitude faster. Improvement thanks to Alexey Sergushichev (https://github.com/rcastelo/GSVA/pull/15).
+
+   o The function 'gsva()' now issues a warning when one or more gene sets are singletons, i.e., they are formed by just one feature/gene.
+
+CHANGES IN VERSION 1.34
+-----------------------
+
+BUG FIXES
+
+   o Bugfix to handle when parallel::detectCores() returns NA instead of an integer number of cores, which may happen when running GSVA in a docker container. Bug reporting and pull request fix thanks to Aaron (https://github.com/rcastelo/GSVA/pull/10).
+
+   o Bugfix to handle when arguments 'method="ssgsea"' and 'tau=0'. Bug reporting thanks to Lena Morill (https://github.com/rcastelo/GSVA/issues/4).
+
+CHANGES IN VERSION 1.28
+-----------------------
+
+USER VISIBLE CHANGES
+
+   o Arguments 'rnaseq', 'kernel', 'no.bootstraps' and 'bootstrap.percent' have become defunct.
+
+   o A Bioconductor sticker has been created and it is available at https://github.com/Bioconductor/BiocStickers/tree/master/GSVA
+
+CHANGES IN VERSION 1.26
+-----------------------
+
+USER VISIBLE CHANGES
+
+    o Updated implementation of the option 'abs.ranking=TRUE' to use the original Kuiper statistic.
+
+    o Arguments 'rnaseq' and 'kernel' have been deprecated and replaced by a new argument 'kcdf'.
+
+    o Arguments 'no.bootstraps' and 'bootstrap.percent' have been deprecated.
+
+    o The return value with the default argument 'method="gsva"' has been simplified and it is not a list object anymore. Now the 'gsva()' function return always a matrix or an 'ExpressionSet' object, when the input expression data is also an 'ExpressionSet' object.
+
+    o The 'gsva()' function can now be used through a shiny app that runs through the function 'igsva()'.
+
+CHANGES IN VERSION 1.24
+-----------------------
+
+BUG FIXES
+
+    o Bugfixes on the parallel execution of gsva() with bootstrap calculations.
+
+CHANGES IN VERSION 1.14
+-----------------------
+
+USER VISIBLE CHANGES
+
+    o added an argument 'ssgsea.norm' to the 'gsva()' function to enable disabling the default score normalization of the original SSGSEA method by Barbie et al. (2009).
+
+BUG FIXES
+
+    o Better error handling of the situation when no gene identifiers match between gene sets and expression data.
+
+CHANGES IN VERSION 1.4
+----------------------
+
+USER VISIBLE CHANGES
+
+    o removed the system-requirement dependency from the GNU Scientific Library
+
+    o added two additional gene-set expression summarization methods: single-sample GSEA from Barbie et al. (Nature, 2009) and a combined Z-score method similar to the one used by Lee et al. (PLos Comp Biol, 2008) via a new 'method' argument in the 'gsva()' function
+
+    o added handling of RNA-seq expression data matrices by the GSVA method with a new 'rnaseq' argument in the 'gsva()' function
+
+    o added a method with signature(expr="matrix", gset.idx.list="GeneSetCollection", annotation="character") which did not exist before. Now gsva() accepts the following pairs of data structures storing expression data and gene sets: ExpressionSet-GeneSetCollection, ExpressionSet-list, matrix-GeneSetCollection and matrix-list
+
+BUG FIXES
+
+    o matching of gene IDs from ExpressionSet objects to GeneSetCollection objects now also works with Entrez-based gene IDs in ExpressionSet objects (e.g., when annotation(eset) == "org.Hs.eg.db") by using GSEABase >= 1.17.4
+
+CHANGES IN VERSION 0.9
+----------------------
+
+USER VISIBLE CHANGES
+
+    o first version of the package
+
+(start date: 18 Feburary, 2011)

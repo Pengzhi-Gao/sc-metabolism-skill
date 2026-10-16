@@ -1,0 +1,240 @@
+import os
+from pathlib import Path
+
+try:
+    from log_message import log_message
+except ModuleNotFoundError as e:
+    raise ImportError(
+        "Cannot import 'log_message' from the thisutils R package. "
+        "Install thisutils (>= 0.4.8) and configure the Python "
+        "environment with ConfigureEnv()."
+    ) from e
+
+
+def _expand_path(path):
+    if path is None:
+        return None
+    return str(Path(str(path)).expanduser())
+
+
+def _expand_pathlike(value):
+    if isinstance(value, (str, os.PathLike)):
+        return _expand_path(value)
+    return value
+
+
+def _copy_obsm_value(value):
+    try:
+        return value.copy()
+    except AttributeError:
+        return value
+
+
+def _as_list(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    return [str(x) for x in list(value)]
+
+
+def _read_anndata(test_input):
+    if isinstance(test_input, (str, os.PathLike)):
+        import scanpy as sc
+
+        return sc.read_h5ad(_expand_path(test_input))
+    return test_input
+
+
+def _ensure_writable_anndata(test_input):
+    """Copy only AnnData inputs whose expression buffer is read-only."""
+    if isinstance(test_input, (str, os.PathLike)):
+        return test_input
+    matrix = getattr(test_input, "X", None)
+    values = getattr(matrix, "data", matrix)
+    flags = getattr(values, "flags", None)
+    if flags is None or bool(flags.writeable):
+        return test_input
+    copied = test_input.copy()
+    copied.X = copied.X.copy()
+    return copied
+
+
+def _load_smf_module(module_name):
+    import importlib.util
+    import sys
+
+    spec = importlib.util.find_spec("scMalignantFinder")
+    if spec is None or not spec.submodule_search_locations:
+        raise ModuleNotFoundError("No module named 'scMalignantFinder'")
+    package_dir = Path(list(spec.submodule_search_locations)[0])
+    module_path = package_dir / f"{module_name}.py"
+    if not module_path.exists():
+        raise ModuleNotFoundError(f"No scMalignantFinder module named '{module_name}'")
+
+    scoped_name = f"_scop_scmalignantfinder_{module_name}"
+    if scoped_name in sys.modules:
+        return sys.modules[scoped_name]
+    module_spec = importlib.util.spec_from_file_location(scoped_name, module_path)
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[scoped_name] = module
+    module_spec.loader.exec_module(module)
+    return module
+
+
+def _run_aucell(adata, gmt_file, norm_type=False):
+    utils = _load_smf_module("utils")
+
+    gmt_file = _expand_path(gmt_file)
+    try:
+        return utils.aucell_cal(adata, gmt_file, norm_type=bool(norm_type))
+    except TypeError:
+        return utils.aucell_cal(adata, gmt_file)
+
+
+def _obs_frame(adata, columns=None, before=None):
+    if columns is None:
+        columns = []
+    columns = [c for c in columns if c in adata.obs.columns]
+    if not columns and before is not None:
+        columns = [c for c in adata.obs.columns if c not in before]
+    if not columns:
+        log_message("No expected scMalignantFinder result columns were returned", message_type="error")
+    return adata.obs.loc[:, columns].copy()
+
+
+def run_scmalignantfinder(
+    test_input,
+    pretrain_dir=None,
+    train_h5ad_path=None,
+    feature_path=None,
+    model_method="LogisticRegression",
+    norm_type=False,
+    use_raw=False,
+    n_thread=1,
+    return_obs=True,
+    verbose=True,
+):
+    classifier = _load_smf_module("classifier")
+
+    kwargs = {
+        "test_input": _ensure_writable_anndata(_expand_pathlike(test_input)),
+        "pretrain_dir": _expand_path(pretrain_dir),
+        "train_h5ad_path": _expand_path(train_h5ad_path),
+        "feature_path": _expand_path(feature_path),
+        "model_method": model_method,
+        "norm_type": bool(norm_type),
+        "use_raw": bool(use_raw),
+        "n_thread": int(n_thread),
+    }
+    kwargs = {key: value for key, value in kwargs.items() if value is not None}
+
+    try:
+        model = classifier.scMalignantFinder(**kwargs)
+    except TypeError as exc:
+        if "use_raw" not in kwargs:
+            raise
+        kwargs.pop("use_raw", None)
+        try:
+            model = classifier.scMalignantFinder(**kwargs)
+        except TypeError:
+            raise exc
+
+    model.load()
+    result_adata = model.predict()
+
+    if return_obs:
+        return _obs_frame(
+            result_adata,
+            columns=["scMalignantFinder_prediction", "malignancy_probability"],
+        )
+    return result_adata
+
+
+def run_scmalignant_region(
+    test_input,
+    signature_gmt,
+    features=None,
+    nclus=3,
+    define_feature="Malignant_up",
+    spatial_nn=True,
+    spatial_coordinates=None,
+    spatial_key="spatial",
+    image=False,
+    norm_type=False,
+    return_obs=True,
+    verbose=True,
+):
+    import numpy as np
+    from scMalignantFinder import spatial as smf_spatial
+
+    adata = _read_anndata(test_input)
+    spatial_key = "spatial" if spatial_key is None else str(spatial_key)
+    if spatial_coordinates is not None:
+        spatial_coordinates = np.asarray(spatial_coordinates, dtype=float)
+        if spatial_coordinates.shape[0] != adata.n_obs:
+            log_message(
+                "spatial_coordinates must have one row for each observation",
+              message_type="error")
+        adata.obsm[spatial_key] = spatial_coordinates
+
+    adata = _run_aucell(adata, signature_gmt, norm_type=norm_type)
+    if image:
+        adata = smf_spatial.image_cal(adata)
+
+    features = _as_list(features)
+    if features is None:
+        features = ["malignancy_probability", "Malignant_up"]
+        if image:
+            features.append("image_score")
+
+    alias_spatial = bool(spatial_nn) and spatial_key != "spatial"
+    had_spatial = False
+    old_spatial = None
+    if alias_spatial:
+        if spatial_key not in adata.obsm:
+            log_message(f"spatial_key '{spatial_key}' was not found in adata.obsm", message_type="error")
+        had_spatial = "spatial" in adata.obsm
+        if had_spatial:
+            old_spatial = _copy_obsm_value(adata.obsm["spatial"])
+        adata.obsm["spatial"] = _copy_obsm_value(adata.obsm[spatial_key])
+
+    try:
+        adata = smf_spatial.region_identification(
+            adata,
+            features=features,
+            nclus=int(nclus),
+            define_feature=define_feature,
+            spatial_nn=bool(spatial_nn),
+        )
+    finally:
+        if alias_spatial:
+            if had_spatial:
+                adata.obsm["spatial"] = old_spatial
+            elif "spatial" in adata.obsm:
+                del adata.obsm["spatial"]
+
+    if return_obs:
+        preferred = ["cluster", "region_prediction", "Malignant_up", "image_score"]
+        preferred.extend(features)
+        return _obs_frame(adata, columns=list(dict.fromkeys(preferred)))
+    return adata
+
+
+def run_scmalignant_states(
+    test_input,
+    gene_sets,
+    norm_type=False,
+    return_obs=True,
+    verbose=True,
+):
+    adata = _read_anndata(test_input)
+    before = set(adata.obs.columns)
+    adata = _run_aucell(adata, gene_sets, norm_type=norm_type)
+
+    if return_obs:
+        preferred = [c for c in adata.obs.columns if c not in before]
+        if not preferred:
+            preferred = [c for c in adata.obs.columns if str(c).startswith("MP")]
+        return _obs_frame(adata, columns=preferred)
+    return adata

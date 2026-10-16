@@ -1,0 +1,351 @@
+
+
+make_scanpy_mock <- function(
+  n_genes = 10,
+  n_cells = 20,
+  n_neighbors = 4,
+  n_dims = 2,
+  seed = 42
+) {
+  set.seed(seed)
+  spliced <- matrix(
+    stats::rgamma(n_genes * n_cells, shape = 2, rate = 1),
+    nrow = n_genes,
+    ncol = n_cells
+  )
+  beta <- 0.5
+  unspliced <- beta * spliced + matrix(
+    stats::rnorm(n_genes * n_cells, sd = 0.2),
+    nrow = n_genes,
+    ncol = n_cells
+  )
+  unspliced <- pmax(unspliced, 0)
+
+  knn_idx <- matrix(NA_integer_, nrow = n_cells, ncol = n_neighbors)
+  for (i in seq_len(n_cells)) {
+    candidates <- setdiff(seq_len(n_cells), i)
+    knn_idx[i, ] <- sort(sample(candidates, n_neighbors))
+  }
+
+  embedding <- matrix(
+    stats::rnorm(n_cells * n_dims, sd = 2),
+    nrow = n_cells,
+    ncol = n_dims
+  )
+
+  list(
+    spliced = spliced,
+    unspliced = unspliced,
+    knn_idx = knn_idx,
+    embedding = embedding,
+    n_genes = n_genes,
+    n_cells = n_cells,
+    n_neighbors = n_neighbors,
+    n_dims = n_dims,
+    beta = beta
+  )
+}
+
+make_velocity_plot_object <- function() {
+  counts <- matrix(
+    1,
+    nrow = 2,
+    ncol = 6,
+    dimnames = list(paste0("gene", 1:2), paste0("cell", 1:6))
+  )
+  srt <- suppressWarnings(SeuratObject::CreateSeuratObject(counts))
+  embedding <- cbind(
+    UMAP_1 = seq(-1, 1, length.out = 6),
+    UMAP_2 = c(-1, -0.4, 0, 0.3, 0.7, 1)
+  )
+  rownames(embedding) <- colnames(srt)
+  velocity <- cbind(
+    velocity_1 = rep(0.25, 6),
+    velocity_2 = rep(0.1, 6)
+  )
+  rownames(velocity) <- colnames(srt)
+  srt[["umap"]] <- SeuratObject::CreateDimReducObject(
+    embeddings = embedding,
+    key = "UMAP_",
+    assay = "RNA"
+  )
+  srt[["stochastic_umap"]] <- SeuratObject::CreateDimReducObject(
+    embeddings = velocity,
+    key = "velocity_",
+    assay = "RNA"
+  )
+  srt
+}
+
+test_that("VelocityPlot keeps arrowheads device-independent", {
+  layers <- VelocityPlot(
+    make_velocity_plot_object(),
+    reduction = "umap",
+    plot_type = "raw",
+    return_layer = TRUE
+  )
+  arrow_length <- layers$velocity_layer[[1]]$geom_params$arrow$length
+  expect_identical(grid::unitType(arrow_length), "mm")
+  expect_equal(as.numeric(arrow_length), 1.5)
+  expect_equal(layers$velocity_layer[[1]]$aes_params$linewidth, 0.25)
+})
+
+
+test_that("scanpy_stochastic_embedding_cpp returns a named list with correct fields", {
+  dat <- make_scanpy_mock()
+  out <- scanpy_stochastic_embedding_cpp(
+    spliced = dat$spliced,
+    unspliced = dat$unspliced,
+    knn_idx = dat$knn_idx,
+    embedding = dat$embedding
+  )
+
+  expect_type(out, "list")
+  required <- c("velocity_embedding", "confidence", "velocity_length", "gamma")
+  expect_true(all(required %in% names(out)))
+
+  expect_true(is.matrix(out$velocity_embedding))
+  expect_equal(dim(out$velocity_embedding), c(dat$n_cells, dat$n_dims))
+  expect_true(all(is.finite(out$velocity_embedding)))
+
+  expect_type(out$confidence, "double")
+  expect_length(out$confidence, dat$n_cells)
+  expect_true(all(out$confidence >= 0, na.rm = TRUE))
+  expect_true(all(out$confidence <= 1, na.rm = TRUE))
+
+  expect_type(out$velocity_length, "double")
+  expect_length(out$velocity_length, dat$n_cells)
+  expect_true(all(out$velocity_length >= 0, na.rm = TRUE))
+
+  expect_type(out$gamma, "double")
+  expect_length(out$gamma, dat$n_genes)
+  expect_true(all(out$gamma >= 0, na.rm = TRUE))
+})
+
+
+test_that("scvelo handles all-zero expression", {
+  n_genes <- 5
+  n_cells <- 10
+  spliced <- matrix(0, nrow = n_genes, ncol = n_cells)
+  unspliced <- matrix(0, nrow = n_genes, ncol = n_cells)
+  knn_idx <- matrix(NA_integer_, nrow = n_cells, ncol = 3)
+  for (i in seq_len(n_cells)) {
+    candidates <- setdiff(seq_len(n_cells), i)
+    knn_idx[i, ] <- sort(sample(candidates, 3))
+  }
+  set.seed(1)
+  embedding <- matrix(rnorm(n_cells * 2), nrow = n_cells, ncol = 2)
+
+  out <- scanpy_stochastic_embedding_cpp(
+    spliced = spliced,
+    unspliced = unspliced,
+    knn_idx = knn_idx,
+    embedding = embedding
+  )
+
+  expect_true(all(out$velocity_embedding == 0))
+  expect_true(all(out$confidence == 0))
+  expect_true(all(out$velocity_length == 0))
+  expect_true(all(out$gamma == 0))
+})
+
+
+test_that("scvelo estimates gamma ~ 1 when unspliced = spliced", {
+  n_genes <- 20
+  n_cells <- 30
+  set.seed(1)
+  spliced <- matrix(
+    stats::rgamma(n_genes * n_cells, shape = 3, rate = 1),
+    nrow = n_genes, ncol = n_cells
+  )
+  unspliced <- spliced
+  knn_idx <- matrix(NA_integer_, nrow = n_cells, ncol = 4)
+  for (i in seq_len(n_cells)) {
+    candidates <- setdiff(seq_len(n_cells), i)
+    knn_idx[i, ] <- sort(sample(candidates, 4))
+  }
+  set.seed(1)
+  embedding <- matrix(rnorm(n_cells * 2), nrow = n_cells, ncol = 2)
+
+  out <- scanpy_stochastic_embedding_cpp(
+    spliced = spliced,
+    unspliced = unspliced,
+    knn_idx = knn_idx,
+    embedding = embedding
+  )
+
+  expect_equal(out$gamma, rep(1, n_genes), tolerance = 0.1)
+  expect_true(mean(out$velocity_length) < 0.1)
+})
+
+
+test_that("scvelo handles single cell gracefully", {
+  n_genes <- 5
+  n_cells <- 1
+  spliced <- matrix(runif(n_genes), nrow = n_genes, ncol = n_cells)
+  unspliced <- matrix(runif(n_genes), nrow = n_genes, ncol = n_cells)
+  knn_idx <- matrix(NA_integer_, nrow = n_cells, ncol = 3)
+  embedding <- matrix(runif(2), nrow = 1, ncol = 2)
+
+  expect_error(
+    scanpy_stochastic_embedding_cpp(
+      spliced = spliced,
+      unspliced = unspliced,
+      knn_idx = knn_idx,
+      embedding = embedding
+    ),
+    NA
+  )
+})
+
+
+test_that("scvelo works with 1 neighbor", {
+  n_genes <- 5
+  n_cells <- 10
+  set.seed(1)
+  spliced <- matrix(runif(n_genes * n_cells), nrow = n_genes, ncol = n_cells)
+  unspliced <- matrix(runif(n_genes * n_cells), nrow = n_genes, ncol = n_cells)
+  knn_idx <- matrix(NA_integer_, nrow = n_cells, ncol = 1)
+  for (i in seq_len(n_cells)) {
+    candidates <- setdiff(seq_len(n_cells), i)
+    knn_idx[i, ] <- sample(candidates, 1)
+  }
+  embedding <- matrix(rnorm(n_cells * 2), nrow = n_cells, ncol = 2)
+
+  out <- scanpy_stochastic_embedding_cpp(
+    spliced = spliced,
+    unspliced = unspliced,
+    knn_idx = knn_idx,
+    embedding = embedding
+  )
+
+  expect_equal(dim(out$velocity_embedding), c(10, 2))
+  expect_true(all(is.finite(out$velocity_embedding)))
+})
+
+
+test_that("scanpy_stochastic_embedding_cpp is deterministic", {
+  dat <- make_scanpy_mock(seed = 42)
+  out1 <- scanpy_stochastic_embedding_cpp(
+    spliced = dat$spliced,
+    unspliced = dat$unspliced,
+    knn_idx = dat$knn_idx,
+    embedding = dat$embedding
+  )
+  out2 <- scanpy_stochastic_embedding_cpp(
+    spliced = dat$spliced,
+    unspliced = dat$unspliced,
+    knn_idx = dat$knn_idx,
+    embedding = dat$embedding
+  )
+  expect_equal(out1, out2)
+})
+
+
+test_that("scvelo gamma reflects relationship between spliced and unspliced", {
+  n_genes <- 10
+  n_cells <- 30
+  set.seed(1)
+  spliced <- matrix(runif(n_genes * n_cells, 1, 10), nrow = n_genes, ncol = n_cells)
+  unspliced <- spliced
+  unspliced[1:5, ] <- unspliced[1:5, ] * 2.0
+  unspliced[6:10, ] <- unspliced[6:10, ] * 0.1
+
+  knn_idx <- matrix(NA_integer_, nrow = n_cells, ncol = 4)
+  for (i in seq_len(n_cells)) {
+    candidates <- setdiff(seq_len(n_cells), i)
+    knn_idx[i, ] <- sort(sample(candidates, 4))
+  }
+  embedding <- matrix(rnorm(n_cells * 2), nrow = n_cells, ncol = 2)
+
+  out <- scanpy_stochastic_embedding_cpp(
+    spliced = spliced,
+    unspliced = unspliced,
+    knn_idx = knn_idx,
+    embedding = embedding
+  )
+
+  expect_true(mean(out$gamma[1:5]) > mean(out$gamma[6:10]) + 0.5)
+})
+
+
+test_that("scvelo rejects mismatched spliced/unspliced dimensions", {
+  dat <- make_scanpy_mock()
+  expect_error(
+    scanpy_stochastic_embedding_cpp(
+      spliced = dat$spliced[1:5, , drop = FALSE],
+      unspliced = dat$unspliced,
+      knn_idx = dat$knn_idx,
+      embedding = dat$embedding
+    ),
+    "spliced and unspliced must have identical dimensions",
+    ignore.case = TRUE
+  )
+})
+
+test_that("scvelo rejects mismatched knn_idx rows vs cells", {
+  dat <- make_scanpy_mock()
+  expect_error(
+    scanpy_stochastic_embedding_cpp(
+      spliced = dat$spliced,
+      unspliced = dat$unspliced,
+      knn_idx = dat$knn_idx[1:5, , drop = FALSE],
+      embedding = dat$embedding
+    ),
+    "knn_idx",
+    ignore.case = TRUE
+  )
+})
+
+test_that("scvelo rejects mismatched embedding rows vs cells", {
+  dat <- make_scanpy_mock()
+  expect_error(
+    scanpy_stochastic_embedding_cpp(
+      spliced = dat$spliced,
+      unspliced = dat$unspliced,
+      knn_idx = dat$knn_idx,
+      embedding = dat$embedding[1:5, , drop = FALSE]
+    ),
+    "embedding",
+    ignore.case = TRUE
+  )
+})
+
+
+test_that("scvelo embedding output is finite and well-scaled", {
+  n_genes <- 30
+  n_cells <- 50
+  set.seed(1)
+  spliced <- matrix(
+    stats::rgamma(n_genes * n_cells, shape = 2, rate = 1),
+    nrow = n_genes, ncol = n_cells
+  )
+  unspliced <- 0.3 * spliced + matrix(
+    rnorm(n_genes * n_cells, sd = 0.1),
+    nrow = n_genes, ncol = n_cells
+  )
+  unspliced <- pmax(unspliced, 0)
+
+  knn_idx <- matrix(NA_integer_, nrow = n_cells, ncol = 6)
+  for (i in seq_len(n_cells)) {
+    candidates <- setdiff(seq_len(n_cells), i)
+    knn_idx[i, ] <- sort(sample(candidates, min(6, length(candidates))))
+  }
+  set.seed(99)
+  embedding <- matrix(rnorm(n_cells * 2), nrow = n_cells, ncol = 2)
+
+  out <- scanpy_stochastic_embedding_cpp(
+    spliced = spliced,
+    unspliced = unspliced,
+    knn_idx = knn_idx,
+    embedding = embedding
+  )
+
+  expect_true(all(is.finite(out$velocity_embedding)))
+  expect_true(all(is.finite(out$confidence)))
+  expect_true(all(is.finite(out$velocity_length)))
+  expect_true(all(is.finite(out$gamma)))
+
+  expect_gt(mean(out$velocity_length), 0)
+  expect_gt(max(out$confidence), 0)
+})

@@ -1,0 +1,690 @@
+make_cell_dim_plot_srt <- function(n_cells = 10L) {
+  counts <- matrix(rpois(6L * n_cells, lambda = 5), nrow = 6)
+  rownames(counts) <- paste0("gene", seq_len(nrow(counts)))
+  colnames(counts) <- paste0("cell", seq_len(ncol(counts)))
+  counts <- Matrix::Matrix(counts, sparse = TRUE)
+  srt <- Seurat::CreateSeuratObject(counts = counts)
+  srt$celltype <- rep(c("A1", "A2", "B1", "B2"), length.out = n_cells)
+  srt$major_type <- ifelse(grepl("^A", srt$celltype), "A", "B")
+  n_left <- ceiling(n_cells / 2)
+  n_right <- n_cells - n_left
+  embedding <- cbind(
+    c(seq(0, 0.4, length.out = n_left), seq(2, 2.4, length.out = n_right)),
+    c(seq(0, 0.4, length.out = n_left), seq(2, 2.4, length.out = n_right))
+  )
+  rownames(embedding) <- colnames(srt)
+  colnames(embedding) <- c("UMAP_1", "UMAP_2")
+  srt[["umap"]] <- SeuratObject::CreateDimReducObject(
+    embeddings = embedding,
+    key = "UMAP_",
+    assay = SeuratObject::DefaultAssay(srt)
+  )
+  srt
+}
+
+test_that("FeatureDimPlot reuses the expression layer for co-expression", {
+  srt <- make_cell_dim_plot_srt()
+  counts <- GetAssayData5(srt, assay = "RNA", layer = "counts")
+  calls <- 0L
+  testthat::local_mocked_bindings(
+    GetAssayData5 = function(...) {
+      calls <<- calls + 1L
+      counts
+    },
+    CheckDataType = function(...) "raw_counts",
+    .package = "scop"
+  )
+
+  expect_no_error(
+    FeatureDimPlot(
+      srt,
+      features = c("gene1", "gene2"),
+      reduction = "umap",
+      layer = "counts",
+      calculate_coexp = TRUE,
+      force = TRUE,
+      verbose = FALSE
+    )
+  )
+  expect_identical(calls, 1L)
+})
+
+test_that("FeatureDimPlot3D supports sparse co-expression", {
+  srt <- make_cell_dim_plot_srt()
+  embedding <- cbind(
+    srt[["umap"]]@cell.embeddings,
+    UMAP_3 = seq_len(ncol(srt)) / ncol(srt)
+  )
+  srt[["umap3d"]] <- SeuratObject::CreateDimReducObject(
+    embeddings = embedding,
+    key = "UMAP3D_",
+    assay = SeuratObject::DefaultAssay(srt)
+  )
+
+  plot <- FeatureDimPlot3D(
+    srt,
+    features = c("gene1", "gene2"),
+    reduction = "umap3d",
+    layer = "counts",
+    calculate_coexp = TRUE,
+    force = TRUE,
+    verbose = FALSE
+  )
+  expect_s3_class(plot, "plotly")
+})
+
+test_that("CellDimPlot keeps colour scale guides as characters for ggnewscale", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    raster = FALSE,
+    force = TRUE
+  )
+
+  colour_scale <- plot$scales$get_scales("colour")
+  expect_true(is.character(colour_scale$guide))
+  expect_false(inherits(colour_scale$guide, "Guide"))
+})
+
+test_that("CellDimPlot can overlay lineages without ggplot2 guide comparison errors", {
+  srt <- make_cell_dim_plot_srt()
+  srt$Lineage1 <- seq(0, 1, length.out = ncol(srt))
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    lineages = "Lineage1",
+    raster = FALSE,
+    force = TRUE
+  )
+
+  expect_true(inherits(plot, "ggplot") || inherits(plot, "patchwork"))
+  expect_no_error(ggplot2::ggplot_build(plot))
+})
+
+test_that("CellDimPlot supports atlas-style grid and marked groups", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    add_grid = TRUE,
+    grid_n = 4,
+    add_mark = TRUE,
+    mark_alpha = 0,
+    mark_linetype = 2,
+    mark_linewidth = 0.3,
+    mark_border = "grey30",
+    label = TRUE,
+    label_insitu = TRUE,
+    label_repel = TRUE,
+    legend.position = "bottom",
+    theme_use = "theme_blank",
+    force = TRUE
+  )
+
+  built <- ggplot2::ggplot_build(plot)
+  expect_s3_class(plot, "ggplot")
+  expect_equal(nrow(built$data[[1]]), 16)
+  expect_true(any(vapply(built$data, nrow, integer(1)) == ncol(srt)))
+})
+
+test_that("CellDimPlot keeps synthetic split metadata local", {
+  srt <- make_cell_dim_plot_srt()
+  original_meta <- srt@meta.data
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    raster = FALSE,
+    force = TRUE
+  )
+
+  expect_s3_class(plot, "ggplot")
+  expect_identical(srt@meta.data, original_meta)
+  expect_false("All.groups" %in% colnames(srt@meta.data))
+})
+
+test_that("CellDimPlot can color subgroups while labeling major groups", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    label.by = "major_type",
+    mark.by = "major_type",
+    reduction = "umap",
+    add_mark = TRUE,
+    mark_alpha = 0,
+    label = TRUE,
+    label_insitu = TRUE,
+    legend.position = "bottom",
+    force = TRUE
+  )
+
+  built <- ggplot2::ggplot_build(plot)
+  label_values <- unlist(
+    lapply(built$data, function(layer) as.character(layer[["label"]])),
+    use.names = FALSE
+  )
+  expect_true(all(c("A", "B") %in% label_values))
+  expect_false(any(c("A1", "A2", "B1", "B2") %in% label_values))
+})
+
+test_that("CellDimPlot can color subgroups with major-group nested legend", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    label.by = "major_type",
+    mark.by = "major_type",
+    legend.by = "major_type",
+    reduction = "umap",
+    add_grid = FALSE,
+    add_mark = TRUE,
+    mark_alpha = 0,
+    label = TRUE,
+    label_insitu = TRUE,
+    legend.position = "bottom",
+    force = TRUE
+  )
+
+  expect_true(inherits(plot, "patchwork") || inherits(plot, "ggplot"))
+})
+
+test_that("CellDimPlot nested bottom legend is horizontal by default", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    legend.by = "major_type",
+    reduction = "umap",
+    add_mark = TRUE,
+    mark_alpha = 0,
+    legend.position = "bottom",
+    force = TRUE
+  )
+
+  expect_true(inherits(plot, "patchwork") || inherits(plot, "ggplot"))
+})
+
+test_that("CellDimPlot nested right legend stacks grouped subtypes", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    legend.by = "major_type",
+    reduction = "umap",
+    add_mark = TRUE,
+    mark.by = "major_type",
+    mark_alpha = 0,
+    mark_palcolor = c(A = "#444444", B = "#999999"),
+    legend.position = "right",
+    force = TRUE
+  )
+
+  expect_true(inherits(plot, "patchwork") || inherits(plot, "ggplot"))
+})
+
+test_that("CellDimPlot nested right legend wraps dense groups into columns", {
+  parents <- paste0("type", seq_len(12))
+  children <- paste0("sample", seq_len(8))
+  dat <- expand.grid(
+    parent = parents,
+    child = children,
+    stringsAsFactors = FALSE
+  )
+  dat[["group.by"]] <- factor(dat[["child"]], levels = children)
+  dat[["legend.by"]] <- factor(dat[["parent"]], levels = parents)
+  colors <- stats::setNames(grDevices::rainbow(length(children)), children)
+  parent_colors <- stats::setNames(grDevices::rainbow(length(parents)), parents)
+
+  legend <- cell_dim_nested_legend_grob(
+    dat = dat,
+    colors = colors,
+    parent_colors = parent_colors,
+    title = "parent:",
+    legend_position = "right"
+  )
+
+  expect_s3_class(legend, "gtable")
+  expect_true(as.numeric(grid::convertUnit(attr(legend, "legend_space"), "in")) > 1.85)
+})
+
+test_that("CellDimPlot nested legend separates parent and subgroup colors", {
+  srt <- make_cell_dim_plot_srt()
+  dat <- srt@meta.data
+  dat[["group.by"]] <- factor(dat[["celltype"]], levels = c("A1", "A2", "B1", "B2"))
+  dat[["legend.by"]] <- factor(dat[["major_type"]], levels = c("A", "B"))
+  subgroup_colors <- c(A1 = "#111111", A2 = "#222222", B1 = "#333333", B2 = "#444444")
+  parent_colors <- c(A = "#AAAAAA", B = "#BBBBBB")
+
+  legend_data <- cell_dim_nested_legend_data(
+    dat = dat,
+    colors = subgroup_colors,
+    parent_colors = parent_colors
+  )
+
+  expect_equal(legend_data[["parent_colors"]], parent_colors)
+  expect_equal(legend_data[["nested_items"]][["A"]], c("A1", "A2"))
+  expect_equal(legend_data[["nested_items"]][["B"]], c("B1", "B2"))
+  expect_equal(unname(subgroup_colors[legend_data[["nested_items"]][["A"]]]), c("#111111", "#222222"))
+})
+
+test_that("CellDimPlot aligns named colors to group levels", {
+  colors <- cell_dim_palette_colors(
+    c("B", "A"),
+    palcolor = c(A = "#AAAAAA", B = "#BBBBBB")
+  )
+
+  expect_equal(names(colors), c("B", "A"))
+  expect_equal(unname(colors), c("#BBBBBB", "#AAAAAA"))
+})
+
+test_that("CellDimPlot disables default point stroke for small point sizes", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    pt.size = 0.0001,
+    raster = FALSE,
+    force = TRUE
+  )
+
+  point_layers <- Filter(
+    function(layer) inherits(layer$geom, "GeomPoint"),
+    plot$layers
+  )
+  expect_true(length(point_layers) > 0L)
+  point_layer <- point_layers[[length(point_layers)]]
+  expect_equal(point_layer$aes_params$size, 0.0001)
+  expect_equal(point_layer$aes_params$stroke, 0)
+})
+
+test_that("CellDimPlot uses readable default point size", {
+  srt <- make_cell_dim_plot_srt()
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    raster = FALSE,
+    force = TRUE
+  )
+
+  point_layers <- Filter(
+    function(layer) inherits(layer$geom, "GeomPoint"),
+    plot$layers
+  )
+  expect_true(length(point_layers) > 0L)
+  point_layer <- point_layers[[length(point_layers)]]
+  expect_equal(point_layer$aes_params$size, 1)
+  expect_equal(point_layer$aes_params$stroke, 0)
+})
+
+test_that("dimension plot defaults use calibrated square-root scaling", {
+  cell_counts <- c(
+    1000L,
+    3000L,
+    5000L,
+    10000L,
+    20000L,
+    30000L,
+    50000L,
+    100000L
+  )
+
+  expect_equal(
+    vapply(cell_counts, dim_plot_default_pt_size, numeric(1)),
+    c(
+      1,
+      0.6 * sqrt(5000 / 3000),
+      0.6,
+      0.6 * sqrt(5000 / 10000),
+      0.3,
+      0.3,
+      0.3,
+      0.3
+    )
+  )
+})
+
+test_that("dimension plot defaults remain raster-readable at common PNG resolutions", {
+  point_size_mm <- dim_plot_default_pt_size(30000L)
+
+  expect_equal(point_size_mm, 0.3)
+  expect_gte(point_size_mm / 25.4 * 300, 3.5)
+  expect_gte(point_size_mm / 25.4 * 600, 7)
+})
+
+test_that("raster point sizes stay continuous and scale with raster resolution", {
+  expect_equal(dim_plot_raster_pt_size(0.3, auto = TRUE), 2)
+  expect_equal(dim_plot_raster_pt_size(0.3, auto = FALSE), 0.3)
+  expect_equal(dim_plot_raster_pt_size(1.2, auto = TRUE), 2)
+  expect_equal(dim_plot_raster_pt_size(2.2, auto = TRUE), 2.2)
+  expect_equal(
+    dim_plot_raster_pt_size(
+      0.3,
+      auto = FALSE,
+      pixels = c(2048, 2048)
+    ),
+    1.2
+  )
+  expect_equal(
+    dim_plot_raster_pt_size(
+      0.3,
+      auto = TRUE,
+      pixels = c(2048, 2048)
+    ),
+    8
+  )
+})
+
+test_that("CellDimPlot applies continuous resolution-aware raster point sizes", {
+  skip_if_not_installed("scattermore")
+  srt <- make_cell_dim_plot_srt()
+
+  default_plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    raster = TRUE,
+    show_stat = FALSE,
+    force = TRUE
+  )
+  explicit_plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    pt.size = 0.3,
+    raster = TRUE,
+    raster.dpi = c(2048, 2048),
+    show_stat = FALSE,
+    force = TRUE
+  )
+  raster_point_sizes <- function(plot) {
+    unname(vapply(
+      Filter(
+        function(layer) inherits(layer$geom, "GeomScattermore"),
+        plot$layers
+      ),
+      function(layer) layer$geom_params$pointsize,
+      numeric(1)
+    ))
+  }
+
+  expect_equal(raster_point_sizes(default_plot), c(2, 2))
+  expect_equal(raster_point_sizes(explicit_plot), c(1.2, 1.2))
+})
+
+test_that("FeatureDimPlot shares resolution-aware raster point sizing", {
+  skip_if_not_installed("scattermore")
+  srt <- make_cell_dim_plot_srt()
+  srt <- Seurat::NormalizeData(srt, verbose = FALSE)
+  plot <- FeatureDimPlot(
+    srt,
+    features = "gene1",
+    reduction = "umap",
+    pt.size = 0.6,
+    raster = TRUE,
+    raster.dpi = c(2048, 2048),
+    force = TRUE,
+    theme_use = theme_blank
+  )
+  point_sizes <- vapply(
+    Filter(
+      function(layer) inherits(layer$geom, "GeomScattermore"),
+      plot$layers
+    ),
+    function(layer) layer$geom_params$pointsize,
+    numeric(1)
+  )
+
+  expect_true(length(point_sizes) > 0L)
+  expect_true(all(point_sizes == 2.4))
+})
+
+test_that("dimension plot raster settings are shared and validated", {
+  expect_equal(
+    dim_plot_point_config(
+      n = 1000L,
+      raster = TRUE,
+      raster.dpi = c(1024, 2048)
+    ),
+    list(
+      pt.size = 1,
+      raster = TRUE,
+      raster_pt_size = 2 * sqrt(8),
+      raster.dpi = c(1024, 2048)
+    )
+  )
+  expect_error(
+    dim_plot_point_config(
+      n = 1000L,
+      raster = TRUE,
+      raster.dpi = c(512, 0)
+    ),
+    "positive finite"
+  )
+})
+
+test_that("dimension plots auto-rasterize high-density data", {
+  expect_false(dim_plot_auto_raster(100000L))
+  expect_true(dim_plot_auto_raster(100001L))
+})
+
+test_that("CellDimPlot applies scaled and explicit point sizes", {
+  srt <- make_cell_dim_plot_srt(n_cells = 5000L)
+
+  default_plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    raster = FALSE,
+    force = TRUE
+  )
+  explicit_plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    pt.size = 1,
+    raster = FALSE,
+    force = TRUE
+  )
+  point_size <- function(plot) {
+    point_layers <- Filter(
+      function(layer) inherits(layer$geom, "GeomPoint"),
+      plot$layers
+    )
+    point_layers[[length(point_layers)]]$aes_params$size
+  }
+
+  expect_equal(point_size(default_plot), 0.6)
+  expect_equal(point_size(explicit_plot), 1)
+})
+
+test_that("CellDimPlot scales large non-raster plots consistently", {
+  srt <- make_cell_dim_plot_srt(n_cells = 50000L)
+
+  plot <- CellDimPlot(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    raster = FALSE,
+    force = TRUE
+  )
+  point_layers <- Filter(
+    function(layer) inherits(layer$geom, "GeomPoint"),
+    plot$layers
+  )
+
+  expect_equal(
+    point_layers[[length(point_layers)]]$aes_params$size,
+    0.3
+  )
+})
+
+test_that("CellDimPlot scales raster points with resolution", {
+  skip_if_not_installed("scattermore")
+  srt <- make_cell_dim_plot_srt()
+  plot_args <- list(
+    object = srt,
+    group.by = "celltype",
+    reduction = "umap",
+    raster = TRUE,
+    raster.dpi = c(2048, 2048),
+    show_stat = FALSE,
+    force = TRUE
+  )
+  auto_plot <- do.call(CellDimPlot, plot_args)
+  explicit_plot <- do.call(
+    CellDimPlot,
+    c(plot_args, list(pt.size = 0.3))
+  )
+  point_sizes <- function(plot) {
+    vapply(
+      Filter(
+        function(layer) inherits(layer$geom, "GeomScattermore"),
+        plot$layers
+      ),
+      function(layer) layer$geom_params$pointsize,
+      numeric(1)
+    )
+  }
+
+  expect_true(all(point_sizes(auto_plot) == 8))
+  expect_true(all(point_sizes(explicit_plot) == 1.2))
+})
+
+test_that("CellDimPlot validates atlas grid density", {
+  srt <- make_cell_dim_plot_srt()
+
+  expect_error(
+    CellDimPlot(
+      object = srt,
+      group.by = "celltype",
+      reduction = "umap",
+      add_grid = TRUE,
+      grid_n = 1,
+      force = TRUE
+    ),
+    "grid_n"
+  )
+})
+
+test_that("FeatureDimPlot subsets graph before dense conversion without changing values", {
+  srt <- make_cell_dim_plot_srt()
+  srt <- Seurat::NormalizeData(srt, verbose = FALSE)
+  graph <- Matrix::Matrix(0, ncol(srt), ncol(srt), sparse = TRUE)
+  dimnames(graph) <- list(colnames(srt), colnames(srt))
+  graph["cell1", "cell2"] <- 1
+  graph["cell2", "cell1"] <- 1
+  graph["cell1", "cell6"] <- 2
+  graph["cell6", "cell1"] <- 2
+  srt@graphs[["test_graph"]] <- methods::as(graph, "Graph")
+  cells_use <- paste0("cell", 1:5)
+
+  expect_equal(
+    as_matrix(graph[cells_use, cells_use, drop = FALSE]),
+    as_matrix(graph)[cells_use, cells_use]
+  )
+
+  plot <- FeatureDimPlot(
+    srt,
+    features = c("gene1", "gene2"),
+    reduction = "umap",
+    cells = cells_use,
+    compare_features = TRUE,
+    graph = "test_graph",
+    force = TRUE,
+    theme_use = theme_blank
+  )
+
+  expect_true(inherits(plot, "patchwork") || inherits(plot, "ggplot"))
+})
+
+test_that("FeatureDimPlot disables default point stroke for small point sizes", {
+  srt <- make_cell_dim_plot_srt()
+  srt <- Seurat::NormalizeData(srt, verbose = FALSE)
+
+  plot <- FeatureDimPlot(
+    srt,
+    features = "gene1",
+    reduction = "umap",
+    pt.size = 0.0001,
+    raster = FALSE,
+    force = TRUE,
+    theme_use = theme_blank
+  )
+
+  point_layers <- Filter(
+    function(layer) inherits(layer$geom, "GeomPoint"),
+    plot$layers
+  )
+  expect_true(length(point_layers) > 0L)
+  point_layer <- point_layers[[length(point_layers)]]
+  expect_equal(point_layer$aes_params$size, 0.0001)
+  expect_equal(point_layer$aes_params$stroke, 0)
+})
+
+test_that("FeatureDimPlot uses readable default point size", {
+  srt <- make_cell_dim_plot_srt()
+  srt <- Seurat::NormalizeData(srt, verbose = FALSE)
+
+  plot <- FeatureDimPlot(
+    srt,
+    features = "gene1",
+    reduction = "umap",
+    raster = FALSE,
+    force = TRUE,
+    theme_use = theme_blank
+  )
+
+  point_layers <- Filter(
+    function(layer) inherits(layer$geom, "GeomPoint"),
+    plot$layers
+  )
+  expect_true(length(point_layers) > 0L)
+  point_layer <- point_layers[[length(point_layers)]]
+  expect_equal(point_layer$aes_params$size, 1)
+  expect_equal(point_layer$aes_params$stroke, 0)
+})
+
+
+test_that("FeatureDimPlot styles feature headings by identity across reordered splits", {
+  srt <- make_cell_dim_plot_srt()
+  srt$score <- seq_len(ncol(srt))
+  plots <- FeatureDimPlot(
+    srt, features = c("gene2", "score", "gene1"), layer = "counts",
+    split.by = "major_type", reduction = "umap", show_stat = FALSE,
+    title.color = c(gene1 = "#B14B28", gene2 = "#2A6F97"), combine = FALSE,
+    verbose = FALSE
+  )
+  expect_length(plots, 6L)
+  for (p in plots) {
+    f <- unique(p$data$features)
+    expect_identical(p$theme$strip.text.x$face, if (f == "score") "plain" else "italic")
+    expect_identical(p$theme$strip.text.x$colour,
+      switch(f, gene1 = "#B14B28", gene2 = "#2A6F97", score = NULL))
+    expect_equal(nrow(p$data), sum(srt$major_type == unique(p$data$major_type)))
+    expect_no_error(ggplot2::ggplotGrob(p))
+  }
+  p <- FeatureDimPlot(srt, "gene1", layer = "counts", reduction = "umap",
+    title.color = "red", title.face = "bold", combine = FALSE, verbose = FALSE)[[1]]
+  expect_identical(p$theme$strip.text.x$face, "bold")
+  expect_identical(p$theme$strip.text.x$colour, "red")
+  expect_error(FeatureDimPlot(srt, "gene1", title.color = c("red", "blue")), "title.color")
+  expect_error(FeatureDimPlot(srt, "gene1", title.color = c(gene1 = "red", gene1 = "blue")), "title.color")
+  expect_error(FeatureDimPlot(srt, "gene1", title.color = "not-a-color"), "invalid color")
+})

@@ -1,0 +1,256 @@
+#' @import thisutils thisplot
+#' @importFrom Seurat IntegrateEmbeddings
+#' @importFrom SeuratObject AddMetaData CreateAssayObject CreateDimReducObject
+#'   DefaultAssay DefaultAssay<- Embeddings FetchData Idents Idents<-
+#' @importFrom ggplot2 .pt aes after_stat alpha annotate coord_cartesian coord_flip
+#'   coord_polar draw_key_point element_blank element_line element_rect
+#'   element_text expand_limits expansion facet_grid facet_null facet_wrap
+#'   geom_bar geom_blank geom_boxplot geom_col geom_count geom_density_2d
+#'   geom_hex geom_hline geom_label geom_line geom_linerange geom_path geom_point
+#'   geom_pointrange geom_rect geom_ribbon geom_rug geom_segment geom_smooth
+#'   geom_text geom_tile geom_violin geom_vline ggplot ggplot_build ggtitle
+#'   guide_colorbar guide_legend guide_none guides labs layer_data layer_scales
+#'   margin mean_sdl position_dodge position_jitterdodge scale_alpha_continuous
+#'   scale_alpha_manual scale_color_gradientn scale_color_identity
+#'   scale_color_manual scale_color_viridis_c scale_colour_gradient
+#'   scale_fill_gradient scale_fill_gradientn scale_fill_identity
+#'   scale_fill_manual scale_linetype_manual scale_linewidth
+#'   scale_linewidth_continuous scale_shape_identity scale_size scale_size_area
+#'   scale_x_continuous scale_x_discrete scale_y_continuous scale_y_discrete
+#'   stat_density2d stat_density_2d stat_summary stat_summary_hex theme
+#'   theme_bw theme_classic theme_dark theme_gray theme_grey theme_light
+#'   theme_linedraw theme_minimal theme_test theme_void
+#'   xlab ylab
+#' @importFrom ComplexHeatmap %v%
+#' @importFrom ggrepel GeomTextRepel
+#' @importFrom Signac RunSVD
+#' @importFrom ggforce geom_mark_ellipse geom_mark_hull geom_mark_rect geom_mark_circle
+#' @importFrom dplyr "%>%" %>% .data
+#' @importFrom grDevices as.raster
+#' @importFrom methods slot
+#' @importFrom splines bs
+#' @importFrom Rcpp evalCpp
+#' @importFrom RcppParallel RcppParallelLibs
+#' @importFrom stats ave density median model.matrix p.adjust setNames
+#' @importFrom utils getFromNamespace head
+#' @export
+dplyr::`%>%`
+
+#' @importFrom utils read.csv
+#' @importFrom rlang %||%
+#' @export
+rlang::`%||%`
+
+#' Default ggplot2 theme for scop plots
+#'
+#' Backward-compatible alias of [thisplot::theme_this()]. Plot helpers default
+#' to `theme_use = "theme_scop"`. Exporting this name lets users call
+#' `theme_scop()` after `library(scop)` without `:::`.
+#'
+#' @md
+#' @inheritParams thisplot::theme_this
+#' @inherit thisplot::theme_this return
+#' @seealso [thisplot::theme_this()]
+#' @export
+#' @examples
+#' theme_scop()
+theme_scop <- thisplot::theme_this
+
+utils::globalVariables(
+  c(
+    ":=",
+    ".",
+    ".data",
+    "auc",
+    "abs_Cor",
+    "abundance",
+    "avg_log2FC",
+    "Axis_1",
+    "Axis_2",
+    "block_graphics",
+    "boot_CI_2.5",
+    "boot_CI_97.5",
+    "build_composition_input",
+    "bundle",
+    "cell_type",
+    "cell_type_1",
+    "cell_type_2",
+    "cross_knn_f32",
+    "celltype",
+    "cluster",
+    "clusters",
+    "color",
+    "colour",
+    "cor",
+    "combn",
+    "conda_info",
+    "confidence",
+    "cores",
+    "correlation",
+    "count",
+    "Count",
+    "Database",
+    "Dim1",
+    "Dim2",
+    "Description",
+    "DescriptionP",
+    "dim1",
+    "dim2",
+    "dx",
+    "dy",
+    "error",
+    "extract_sccoda_comparison",
+    "exact_knn_f32",
+    "fill",
+    "Freq",
+    "from_dim1",
+    "from_dim2",
+    "gene",
+    "GeneName",
+    "GeneRatio",
+    "group",
+    "group1",
+    "groupn",
+    "Groups",
+    "id",
+    "ID",
+    "intersection",
+    "is_branch",
+    "keyword1",
+    "keyword2",
+    "label",
+    "label_color",
+    "Lineages",
+    "matrix_product",
+    "name",
+    "NES",
+    "next_node",
+    "next_x",
+    "node",
+    "nodes",
+    "obs_log2FD",
+    "palcolor",
+    "pvalue",
+    "raw_Axis_1",
+    "raw_Axis_2",
+    "runningScore",
+    "score",
+    "score_type",
+    "score_type_1",
+    "score_type_2",
+    "setSize",
+    "significance",
+    "state",
+    "Significant",
+    "size",
+    "status",
+    "step",
+    "to_dim1",
+    "to_dim2",
+    "value",
+    "values",
+    "variable",
+    "weight",
+    "x",
+    "x_angle",
+    "x_num",
+    "X",
+    "xend",
+    "x_plot",
+    "y",
+    "y_radius",
+    "Y",
+    "yend",
+    "y_plot",
+    "cell",
+    "contribution",
+    "dataset",
+    "edge_colour",
+    "edge_id",
+    "incoming",
+    "incoming_diff",
+    "interaction_label",
+    "interaction_name",
+    "interaction_plot",
+    "label_plot",
+    "ligand",
+    "magnitude",
+    "object_names",
+    "outgoing",
+    "outgoing_diff",
+    "pair",
+    "parse_proportion_comparisons",
+    "pathway",
+    "plot_metric",
+    "prob",
+    "permutation_test",
+    "receiver",
+    "reg",
+    "run_sccoda_python",
+    "sample_level_proportion_test",
+    "sender",
+    "sender_display",
+    "size_scaled",
+    "specificity",
+    "standardize_proportion_result",
+    "target",
+    "time",
+    "total_links",
+    "value_1",
+    "value_2",
+    "x_from",
+    "validate_proportion_inputs",
+    "x_from_lr",
+    "x_from_rr",
+    "x_from_sl",
+    "x_label",
+    "x_loop_from",
+    "x_loop_to",
+    "x_to",
+    "x_to_lr",
+    "x_to_rr",
+    "x_to_sl",
+    "y_from",
+    "y_from_lr",
+    "y_from_rr",
+    "y_from_sl",
+    "y_label",
+    "y_loop_from",
+    "y_loop_to",
+    "y_to",
+    "y_to_lr",
+    "y_to_rr",
+    "y_to_sl",
+    "credible_label",
+    "chisq_quantile",
+    "direction",
+    "effect_use",
+    "enrich_key",
+    "estimate",
+    "FC",
+    "fits",
+    "fold",
+    "hdi_2.5",
+    "hdi_97.5",
+    "idx",
+    "label_id",
+    "logFC",
+    "minus_log10",
+    "metric",
+    "pred",
+    "proportion",
+    "splits",
+    "subsample_idx",
+    "TF",
+    "true",
+    "xmax",
+    "xmin",
+    "avg_log2FC_raw",
+    "build_context",
+    "build_reference_profiles",
+    "canonical_method",
+    "compose_comparison_label",
+    "resolve_condition_pair",
+    "cca_crossprod_matrix"
+  )
+)

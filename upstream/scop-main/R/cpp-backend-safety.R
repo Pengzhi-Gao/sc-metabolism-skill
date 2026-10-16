@@ -1,0 +1,70 @@
+scop_n_threads <- function(cores = NULL) {
+  if (is.null(cores) || length(cores) < 1L) {
+    return(0L)
+  }
+  n <- suppressWarnings(as.integer(cores[[1L]]))
+  if (length(n) != 1L || is.na(n) || n < 0L) {
+    return(0L)
+  }
+  n
+}
+
+cpp_dense_gib <- function(n_rows, n_cols, copies = 1) {
+  values <- c(n_rows, n_cols, copies)
+  if (
+    length(values) != 3L ||
+      any(!is.finite(values)) ||
+      any(values < 0)
+  ) {
+    log_message("Dense-memory dimensions and copies must be finite non-negative values.", message_type = "error")
+  }
+  as.numeric(n_rows) * as.numeric(n_cols) * 8 * as.numeric(copies) / 1024^3
+}
+
+assert_cpp_dense_budget <- function(
+  n_rows,
+  n_cols,
+  copies,
+  max_dense_gib,
+  context
+) {
+  if (
+    length(max_dense_gib) != 1L ||
+      is.na(max_dense_gib) ||
+      max_dense_gib <= 0
+  ) {
+    log_message("max_dense_gib must be one positive number or Inf.", message_type = "error")
+  }
+  estimated_gib <- cpp_dense_gib(n_rows, n_cols, copies)
+  if (is.finite(max_dense_gib) && estimated_gib > max_dense_gib) {
+    log_message(
+      sprintf(
+        "%s would require at least %.2f GiB for dense working matrices, exceeding max_dense_gib = %.2f. Use a smaller input, choose the reference backend, or explicitly increase max_dense_gib.",
+        context,
+        estimated_gib,
+        max_dense_gib
+      ),
+      message_type = "error"
+    )
+  }
+  estimated_gib
+}
+
+assert_cpp_approximation_opt_in <- function(
+  allow_approximate,
+  context,
+  reference_backend = "python"
+) {
+  if (!isTRUE(allow_approximate)) {
+    log_message(
+      sprintf(
+        "%s is an approximate implementation. Set allow_approximate = TRUE to opt in, or use backend = \"%s\" for the reference workflow.",
+        context,
+        reference_backend
+      ),
+      message_type = "error"
+    )
+  }
+  invisible(TRUE)
+}
+

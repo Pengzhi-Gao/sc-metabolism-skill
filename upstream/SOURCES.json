@@ -1,0 +1,40 @@
+{
+  "GSVA": {
+    "repository": "https://github.com/rcastelo/GSVA",
+    "file_count": 121,
+    "tree_sha256": "7ed9d2f47a09d896c81ddfe81718bc89d1aebf748d61c58e3cabb0f758fa0293",
+    "tree_hash_format": "sha256 of sorted relative path UTF-8, NUL, file sha256 bytes",
+    "commit": "ee3d26be12be691da68a38434f070cb0df003a5d"
+  },
+  "scMetabolism": {
+    "repository": "https://github.com/wu-yc/scMetabolism",
+    "file_count": 21,
+    "tree_sha256": "81b72289576e4ef6402466f2ae131840315f755fddd63e546e53c9b0b7bc77a2",
+    "tree_hash_format": "sha256 of sorted relative path UTF-8, NUL, file sha256 bytes",
+    "commit": "59d6d2b35482013a0ad8bc4db9d588aa8bb37b75"
+  },
+  "VISION-master": {
+    "repository": "https://github.com/YosefLab/VISION",
+    "file_count": 530,
+    "tree_sha256": "4bfed2875360d053ad93e174a590798f785f9418351d0e00095dbae132a69ce7",
+    "tree_hash_format": "sha256 of sorted relative path UTF-8, NUL, file sha256 bytes",
+    "archive": "VISION-master.zip",
+    "archive_sha256": "dcf95a0858a5c11bc204c99ce5432438002b863674d80f1de7286ea0503ce016"
+  },
+  "scFEA-master": {
+    "repository": "https://github.com/changwn/scFEA",
+    "file_count": 67,
+    "tree_sha256": "fbcb84f8a46e1a5dedfb7fb7604c49aa0d9c63df4e4f885bf966330d52b1e1db",
+    "tree_hash_format": "sha256 of sorted relative path UTF-8, NUL, file sha256 bytes",
+    "archive": "scFEA.zip",
+    "archive_sha256": "78afa41c97184307662d341556c665c73949955d5062438915dd6ba0d7d297dc"
+  },
+  "scop-main": {
+    "repository": "https://github.com/mengxu98/scop",
+    "file_count": 933,
+    "tree_sha256": "150f82b7c65fda310c36984e999b642b1d310bf7cdb6f13ce546467d0b216b41",
+    "tree_hash_format": "sha256 of sorted relative path UTF-8, NUL, file sha256 bytes",
+    "archive": "scop.zip",
+    "archive_sha256": "8d97f56e3da6ba36e9f896c9df2ae2eff03f36587b82c6d2bf152340e3371d37"
+  }
+}

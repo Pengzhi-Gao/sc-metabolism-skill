@@ -1,0 +1,315 @@
+#include <RcppArmadillo.h>
+#include <thisutils/log_message.h>
+#include "dynload.h"
+#include "thread_utils.h"
+
+static int component_count(int requested, int features, int cells) {
+  int limit = std::min(features, cells - 1);
+  if (limit < 1) return 0;
+  return std::max(1, std::min(requested, limit));
+}
+
+namespace {
+
+class BlasThreadGuard {
+ public:
+  BlasThreadGuard(int requested, int previous) : previous_(previous) {
+    if (requested > 0) {
+      blas_set_num_threads(requested);
+    }
+  }
+
+  ~BlasThreadGuard() {
+    if (previous_ > 0) {
+      blas_set_num_threads(previous_);
+    }
+  }
+
+ private:
+  int previous_;
+};
+
+enum {
+  scop_cblas_col_major = 102,
+  scop_cblas_no_trans = 111,
+  scop_cblas_trans = 112,
+  scop_cblas_lower = 122
+};
+
+using scop_dsyrk_ptr = void (*)(int, int, int, int, int, double,
+                                const double*, int, double, double*, int);
+using scop_dgemm_ptr = void (*)(int, int, int, int, int, int, double,
+                                const double*, int, const double*, int,
+                                double, double*, int);
+using scop_dsyevr_ptr = void (*)(const char*, const char*, const char*, const int*,
+                                 double*, const int*, const double*, const double*,
+                                 const int*, const int*, const double*, int*,
+                                 double*, double*, const int*, int*, double*,
+                                 const int*, int*, const int*, int*);
+
+struct PcaBlas {
+  void* handle = nullptr;
+  scop_dsyrk_ptr dsyrk = nullptr;
+  scop_dgemm_ptr dgemm = nullptr;
+  scop_dsyevr_ptr dsyevr = nullptr;
+};
+
+static PcaBlas scop_pca_blas;
+static bool scop_pca_blas_checked = false;
+
+static PcaBlas* resolve_pca_blas() {
+  if (scop_pca_blas_checked) {
+    return (scop_pca_blas.dsyrk && scop_pca_blas.dgemm) ? &scop_pca_blas : nullptr;
+  }
+  scop_pca_blas_checked = true;
+  const char* candidates[] = {
+    NULL,
+    "/System/Library/Frameworks/Accelerate.framework/Accelerate",
+    "libopenblas.so.0", "libopenblas.so", "libmkl_rt.so",
+    "libblis.so.4", "libblis.so.3", "libblis.so",
+    "libblas.so.3", "libblas.so",
+    "Rblas.dll", "libopenblas.dll", "openblas.dll", "mkl_rt.dll", NULL
+  };
+  for (int i = 0; candidates[i] != NULL || i == 0; ++i) {
+    void* handle = scop_dlopen(candidates[i]);
+    if (handle == nullptr) {
+      continue;
+    }
+    auto dsyrk = reinterpret_cast<scop_dsyrk_ptr>(scop_dlsym(handle, "cblas_dsyrk"));
+    auto dgemm = reinterpret_cast<scop_dgemm_ptr>(scop_dlsym(handle, "cblas_dgemm"));
+    if (dsyrk == nullptr || dgemm == nullptr) {
+      continue;
+    }
+    scop_pca_blas.handle = handle;
+    scop_pca_blas.dsyrk = dsyrk;
+    scop_pca_blas.dgemm = dgemm;
+    scop_pca_blas.dsyevr =
+      reinterpret_cast<scop_dsyevr_ptr>(scop_dlsym(handle, "dsyevr_"));
+    break;
+  }
+  return (scop_pca_blas.dsyrk && scop_pca_blas.dgemm) ? &scop_pca_blas : nullptr;
+}
+
+static bool fast_gram(const arma::mat& X, arma::mat& gram) {
+  PcaBlas* blas = resolve_pca_blas();
+  if (blas == nullptr) {
+    return false;
+  }
+  const int features = X.n_rows;
+  const int cells = X.n_cols;
+
+  gram.zeros(features, features);
+  blas->dsyrk(
+    scop_cblas_col_major,
+    scop_cblas_lower,
+    scop_cblas_no_trans,
+    features,
+    cells,
+    1.0,
+    X.memptr(),
+    features,
+    0.0,
+    gram.memptr(),
+    features
+  );
+  for (int col = 0; col < features; ++col) {
+    for (int row = col + 1; row < features; ++row) {
+      gram(col, row) = gram(row, col);
+    }
+  }
+  return true;
+}
+
+static bool fast_embeddings(const arma::mat& X,
+                            const arma::mat& loadings,
+                            arma::mat& embeddings) {
+  PcaBlas* blas = resolve_pca_blas();
+  if (blas == nullptr) {
+    return false;
+  }
+  const int features = X.n_rows;
+  const int cells = X.n_cols;
+  const int keep = loadings.n_cols;
+  embeddings.set_size(cells, keep);
+  blas->dgemm(
+    scop_cblas_col_major,
+    scop_cblas_trans,
+    scop_cblas_no_trans,
+    cells,
+    keep,
+    features,
+    1.0,
+    X.memptr(),
+    features,
+    loadings.memptr(),
+    features,
+    0.0,
+    embeddings.memptr(),
+    cells
+  );
+  return true;
+}
+
+static bool fast_top_eigen(arma::mat& gram,
+                           int keep,
+                           arma::vec& eigvals,
+                           arma::mat& loadings) {
+  PcaBlas* blas = resolve_pca_blas();
+  if (blas == nullptr || blas->dsyevr == nullptr) {
+    return false;
+  }
+  const int features = gram.n_rows;
+  if (keep < 1 || keep > features) {
+    return false;
+  }
+
+  const int il = features - keep + 1;
+  const int iu = features;
+  int m = 0;
+  int info = 0;
+  const int ldz = features;
+  const double vl = 0.0;
+  const double vu = 0.0;
+  const double abstol = -1.0;
+  std::vector<double> values(features);
+  std::vector<double> vectors(static_cast<size_t>(features) * keep);
+  std::vector<int> support(static_cast<size_t>(2) * keep);
+
+  double work_query = 0.0;
+  int iwork_query = 0;
+  int lwork = -1;
+  int liwork = -1;
+  blas->dsyevr(
+    "V", "I", "L",
+    &features,
+    gram.memptr(),
+    &features,
+    &vl,
+    &vu,
+    &il,
+    &iu,
+    &abstol,
+    &m,
+    values.data(),
+    vectors.data(),
+    &ldz,
+    support.data(),
+    &work_query,
+    &lwork,
+    &iwork_query,
+    &liwork,
+    &info
+  );
+  if (info != 0 || !std::isfinite(work_query) || iwork_query < 1) {
+    return false;
+  }
+  lwork = static_cast<int>(work_query);
+  liwork = iwork_query;
+  std::vector<double> work(static_cast<size_t>(lwork));
+  std::vector<int> iwork(static_cast<size_t>(liwork));
+  blas->dsyevr(
+    "V", "I", "L",
+    &features,
+    gram.memptr(),
+    &features,
+    &vl,
+    &vu,
+    &il,
+    &iu,
+    &abstol,
+    &m,
+    values.data(),
+    vectors.data(),
+    &ldz,
+    support.data(),
+    work.data(),
+    &lwork,
+    iwork.data(),
+    &liwork,
+    &info
+  );
+  if (info != 0 || m < keep) {
+    return false;
+  }
+
+  eigvals.set_size(keep);
+  loadings.set_size(features, keep);
+  for (int j = 0; j < keep; ++j) {
+    const int source = keep - 1 - j;
+    eigvals[j] = values[static_cast<size_t>(source)];
+    std::copy(
+      vectors.begin() + static_cast<size_t>(source) * features,
+      vectors.begin() + static_cast<size_t>(source + 1) * features,
+      loadings.colptr(j)
+    );
+  }
+  return true;
+}
+}
+
+// [[Rcpp::export]]
+Rcpp::List pca_backend_run(const arma::mat& X,
+                           int npcs,
+                           bool weight_by_var = true,
+                           int n_threads = 0) {
+  const int features = X.n_rows;
+  const int cells = X.n_cols;
+  const int keep = component_count(npcs, features, cells);
+  if (keep < 1) {
+    thisutils::log_message("pca_backend_run: matrix is too small", "error");
+  }
+
+  const int previous_blas = blas_get_num_threads();
+  BlasThreadGuard blas_thread_guard(n_threads, previous_blas);
+
+  arma::mat gram;
+  if (!fast_gram(X, gram)) {
+    gram = X * X.t();
+  }
+  arma::vec values;
+  arma::mat vectors;
+  arma::mat loadings(features, keep);
+  arma::vec eigvals(keep);
+  arma::mat gram_for_eigen = gram;
+  if (!fast_top_eigen(gram_for_eigen, keep, eigvals, loadings)) {
+    if (!arma::eig_sym(values, vectors, gram)) {
+      thisutils::log_message("pca_backend_run: eigensolver failed", "error");
+    }
+    for (int j = 0; j < keep; ++j) {
+      const arma::uword source = static_cast<arma::uword>(values.n_elem - 1 - j);
+      eigvals[j] = values[source];
+      loadings.col(j) = vectors.col(source);
+    }
+  }
+
+  arma::mat embeddings;
+  if (!fast_embeddings(X, loadings, embeddings)) {
+    embeddings = X.t() * loadings;
+  }
+  arma::vec singular = arma::sqrt(arma::clamp(eigvals, 0.0, arma::datum::inf));
+  arma::vec sdev = singular / std::sqrt(static_cast<double>(std::max(1, cells - 1)));
+  if (!weight_by_var) {
+    for (int j = 0; j < keep; ++j) {
+      if (singular[j] > 0.0) embeddings.col(j) /= singular[j];
+    }
+  }
+
+  return Rcpp::List::create(
+    Rcpp::_["embeddings"] = embeddings,
+    Rcpp::_["loadings"] = loadings,
+    Rcpp::_["sdev"] = sdev,
+    Rcpp::_["eigvals"] = eigvals
+  );
+}
+
+// [[Rcpp::export]]
+arma::mat cca_crossprod_matrix(const arma::mat& X1,
+                               const arma::mat& X2) {
+  return X1.t() * X2;
+}
+
+// [[Rcpp::export]]
+arma::mat matrix_product(const arma::mat& A,
+                         const arma::mat& B) {
+  return A * B;
+}

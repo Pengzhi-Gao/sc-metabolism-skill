@@ -1,0 +1,279 @@
+make_spatial_integration_seurat <- function(samples = c("S1", "S2")) {
+  counts <- matrix(
+    c(
+      8, 7, 1, 0, 0, 1,
+      0, 1, 7, 8, 2, 0,
+      5, 0, 1, 0, 6, 7,
+      0, 4, 2, 1, 0, 8
+    ),
+    nrow = 4,
+    byrow = TRUE,
+    dimnames = list(paste0("Gene", 1:4), paste0("Spot", 1:6))
+  )
+  srt <- Seurat::CreateSeuratObject(
+    counts = methods::as(Matrix::Matrix(counts, sparse = TRUE), "dgCMatrix")
+  )
+  srt$sample <- rep(samples, each = 3)
+  srt$col <- c(1, 2, 3, 1, 2, 3)
+  srt$row <- c(1, 1, 1, 2, 2, 2)
+  srt
+}
+
+mock_spatial_integration_backend <- function(code) {
+  testthat::local_mocked_bindings(
+    spatial_integration_run_backend = function(method, input, verbose = TRUE, ...) {
+      expect_identical(method, "PRECAST")
+      expect_equal(input$samples, c("S1", "S2"))
+      expect_s4_class(input$expr, "dgCMatrix")
+      cells <- input$cells
+      list(
+        embedding = matrix(
+          seq_len(length(cells) * 2),
+          ncol = 2,
+          dimnames = list(cells, c("PC1", "PC2"))
+        ),
+        domains = stats::setNames(rep(c("D1", "D2"), length.out = length(cells)), cells),
+        aligned_coords = data.frame(
+          x = input$coords$x + ifelse(input$srt@meta.data[cells, "sample"] == "S2", 10, 0),
+          y = input$coords$y,
+          row.names = cells
+        ),
+        raw_result = list(mock = TRUE)
+      )
+    }
+  )
+  force(code)
+}
+
+test_that("RunSpatialIntegration writes standardized results for merged Seurat", {
+  srt <- make_spatial_integration_seurat()
+  mock_spatial_integration_backend({
+    out <- RunSpatialIntegration(
+      srt,
+      method = "PRECAST",
+      sample.by = "sample",
+      assay = "RNA",
+      layer = "counts",
+      coord.cols = c("col", "row"),
+      verbose = FALSE
+    )
+  })
+
+  expect_equal(unname(out$SpatialIntegration_PRECAST_domain), rep(c("D1", "D2"), 3))
+  expect_true("SpatialIntegration_PRECAST" %in% SeuratObject::Reductions(out))
+  expect_true("SpatialIntegration" %in% names(out@tools))
+  expect_equal(out@tools$SpatialIntegration$active_method, "PRECAST")
+  expect_equal(out@tools$SpatialIntegration$parameters$sample.by, "sample")
+  expect_identical(out@tools$SpatialIntegration$parameters$coordinate_space, "raw")
+  expect_named(out@tools$SpatialIntegration$summary, c("n_cells", "domains", "samples"))
+  expect_named(out@tools$SpatialIntegration$summary$domains, c("domain", "count"))
+  expect_named(out@tools$SpatialIntegration$summary$samples, c("sample", "count"))
+  expect_true(all(c(
+    "SpatialIntegration_PRECAST_aligned_x",
+    "SpatialIntegration_PRECAST_aligned_y"
+  ) %in% colnames(out@meta.data)))
+
+  mock_spatial_integration_backend({
+    light <- RunSpatialIntegration(
+      srt,
+      method = "PRECAST",
+      sample.by = "sample",
+      assay = "RNA",
+      layer = "counts",
+      coord.cols = c("col", "row"),
+      store_object = FALSE,
+      verbose = FALSE
+    )
+  })
+  light_bundle <- light@tools$SpatialIntegration$methods$PRECAST
+  expect_false("raw_result" %in% names(light_bundle))
+  expect_true(all(c("embedding", "domains", "aligned_coords", "parameters", "summary") %in% names(light_bundle)))
+  expect_s3_class(
+    SpatialIntegrationPlot(light, plot_type = "spatial", overlay_image = FALSE),
+    "ggplot"
+  )
+})
+test_that("RunSpatialIntegration supports list input and preserves sample labels", {
+  srt <- make_spatial_integration_seurat()
+  srt_list <- Seurat::SplitObject(srt, split.by = "sample")
+  mock_spatial_integration_backend({
+    out <- RunSpatialIntegration(
+      srt_list,
+      method = "PRECAST",
+      assay = "RNA",
+      layer = "counts",
+      coord.cols = c("col", "row"),
+      verbose = FALSE
+    )
+  })
+
+  expect_true(".spatial_integration_sample" %in% colnames(out@meta.data))
+  expect_equal(sort(unique(out$.spatial_integration_sample)), c("S1", "S2"))
+  expect_true("SpatialIntegration_PRECAST" %in% SeuratObject::Reductions(out))
+  expect_true(all(grepl("^S[12]_", colnames(out))))
+})
+
+test_that("RunSpatialIntegration validates required inputs before backend work", {
+  srt <- make_spatial_integration_seurat()
+  testthat::local_mocked_bindings(
+    spatial_integration_run_backend = function(...) stop("backend should not run")
+  )
+  expect_error(
+    RunSpatialIntegration(srt, method = "PRECAST", verbose = FALSE),
+    "sample.by"
+  )
+  expect_error(
+    RunSpatialIntegration(
+      srt,
+      method = "PRECAST",
+      sample.by = "missing",
+      verbose = FALSE
+    ),
+    "sample.by"
+  )
+  expect_error(
+    RunSpatialIntegration(
+      srt,
+      method = "PRECAST",
+      sample.by = "sample",
+      features = "AbsentGene",
+      verbose = FALSE
+    ),
+    "features"
+  )
+})
+
+test_that("SpatialIntegrationPlot reuses SCOP plot helpers", {
+  srt <- make_spatial_integration_seurat()
+  mock_spatial_integration_backend({
+    out <- RunSpatialIntegration(
+      srt,
+      method = "PRECAST",
+      sample.by = "sample",
+      assay = "RNA",
+      layer = "counts",
+      coord.cols = c("col", "row"),
+      verbose = FALSE
+    )
+  })
+
+  p_spatial <- SpatialIntegrationPlot(
+    out,
+    plot_type = "spatial",
+    coord.cols = c("col", "row"),
+    overlay_image = FALSE
+  )
+  p_embedding <- SpatialIntegrationPlot(out, plot_type = "embedding")
+  p_composition <- SpatialIntegrationPlot(out, plot_type = "composition")
+  p_alignment <- SpatialIntegrationPlot(out, plot_type = "alignment")
+
+  expect_s3_class(p_spatial, "ggplot")
+  expect_s3_class(p_embedding, "ggplot")
+  expect_s3_class(p_composition, "ggplot")
+  expect_s3_class(p_alignment, "ggplot")
+})
+
+
+test_that("PRECAST receives selected features and its SelectModel object argument", {
+  input <- spatial_integration_prepare_input(make_spatial_integration_seurat(),
+    "sample", "RNA", "counts", c("Gene1", "Gene2"), NULL, c("col", "row"))
+  observed <- list()
+  testthat::local_mocked_bindings(
+    check_r = function(...) invisible(TRUE),
+    get_namespace_fun = function(package, name) {
+      expect_identical(package, "PRECAST")
+      switch(name,
+        CreatePRECASTObject = function(seuList, project, customGenelist) {
+          observed$features <<- customGenelist
+          list(step = "created")
+        },
+        AddParSetting = function(PRECASTObj, ...) PRECASTObj,
+        PRECAST = function(PRECASTObj, ...) PRECASTObj,
+        SelectModel = function(obj, ...) {
+          observed$selected <<- obj
+          obj
+        },
+        stop("unexpected PRECAST function")
+      )
+    },
+    spatial_integration_validate_neighbor_count = function(object, adj_params) invisible(NULL),
+    spatial_integration_set_precast_adjacency = function(object, input, adj_params) {
+      expect_identical(adj_params$type, "fixed_number")
+      expect_equal(adj_params$number, 6)
+      object
+    },
+    spatial_integration_validate_adjacency = function(object) c(S1 = 6, S2 = 6),
+    spatial_integration_extract_precast = function(raw_result, input) raw_result
+  )
+
+  out <- spatial_integration_run_backend("PRECAST", input, verbose = FALSE)
+  expect_identical(observed$features, input$features)
+  expect_identical(observed$selected, list(step = "created"))
+  expect_identical(out$step, "created")
+  expect_identical(out$backend_parameters$adj_params$type, "fixed_number")
+  expect_equal(out$adjacency_summary, c(S1 = 6, S2 = 6))
+})
+
+test_that("PRECAST accessor counts describe current assignments and preserve raw fits", {
+  for (store_object in c(TRUE, FALSE)) {
+    mock_spatial_integration_backend({
+      out <- RunSpatialIntegration(make_spatial_integration_seurat(), sample.by = "sample",
+        assay = "RNA", layer = "counts", coord.cols = c("col", "row"),
+        cluster_colname = "custom_domains", tool_name = "custom_integration",
+        store_object = store_object, verbose = FALSE)
+    })
+    expect_spatial_result_lifecycle(out, "custom_integration", "custom_domains", integration = TRUE)
+    expect_identical(GetSpatialResult(out, "PRECAST"), GetSpatialResult(out, "custom_integration"))
+    legacy <- out
+    legacy@tools$custom_integration$result_index <- NULL
+    legacy@tools$custom_integration$methods$PRECAST$result_index <- NULL
+    current <- subset(legacy, cells = c("Spot1", "Spot4"))
+    result <- GetSpatialResult(current, "custom_integration")
+    expect_equal(result$summary$n_cells, 2L)
+    expect_equal(result$summary$samples$count, c(1L, 1L))
+    expect_equal(current@tools$custom_integration$summary$n_cells, 6L)
+    current$sample <- NULL
+    expect_null(GetSpatialResult(current, "custom_integration")$summary$samples)
+    ambiguous <- out
+    ambiguous@tools$other <- out@tools$custom_integration
+    expect_error(GetSpatialResult(ambiguous, "PRECAST"), "Multiple stored results")
+  }
+  mock_spatial_integration_backend({
+    named_banksy <- RunSpatialIntegration(make_spatial_integration_seurat(), sample.by = "sample",
+      assay = "RNA", layer = "counts", coord.cols = c("col", "row"),
+      tool_name = "BANKSY", verbose = FALSE)
+  })
+  expect_identical(GetSpatialResult(named_banksy, "BANKSY"), GetSpatialResult(named_banksy, "PRECAST"))
+  expect_equal(GetSpatialResult(named_banksy, "BANKSY")$summary$n_cells, 6L)
+})
+
+test_that("PRECAST excludes unfitted zero-count spots from current count summaries", {
+  input <- make_spatial_integration_seurat()
+  counts <- Seurat::GetAssayData(input, layer = "counts")
+  counts[, "Spot1"] <- 0
+  input <- Seurat::CreateSeuratObject(counts, meta.data = input[[]])
+  mock_spatial_integration_backend({
+    out <- RunSpatialIntegration(input, sample.by = "sample", assay = "RNA",
+      layer = "counts", coord.cols = c("col", "row"), verbose = FALSE)
+  })
+  before <- out@tools
+  result <- GetSpatialResult(out, "PRECAST")
+  expect_equal(result$summary$n_cells, 5L)
+  expect_identical(rownames(result$clusters), colnames(out)[-1])
+  expect_equal(sum(result$summary$samples$count), 5L)
+  empty <- GetSpatialResult(out[, "Spot1"], "SpatialIntegration")
+  expect_equal(nrow(empty$clusters), 0L)
+  expect_equal(empty$summary$n_cells, 0L)
+  expect_equal(sum(empty$summary$domains$count), 0L)
+  expect_equal(sum(empty$summary$samples$count), 0L)
+  expect_identical(out@tools, before)
+  legacy <- out
+  legacy@tools$SpatialIntegration$result_index <- NULL
+  legacy@tools$SpatialIntegration$methods$PRECAST$result_index <- NULL
+  legacy <- SeuratObject::RenameCells(legacy, new.names = rev(colnames(legacy)))
+  result <- GetSpatialResult(legacy, "PRECAST")
+  expect_equal(result$summary$n_cells, 5L)
+  assigned <- as.character(legacy$SpatialIntegration_PRECAST_domain)
+  expect_identical(result$clusters$SpatialIntegration_PRECAST_domain,
+    unname(assigned[!is.na(assigned)]))
+})

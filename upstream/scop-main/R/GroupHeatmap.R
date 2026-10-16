@@ -1,0 +1,2366 @@
+#' @title Group heatmap
+#'
+#' @md
+#' @inheritParams thisutils::log_message
+#' @inheritParams thisutils::parallelize_fun
+#' @inheritParams CellDimPlot
+#' @inheritParams PrepareDB
+#' @inheritParams scop-params
+#' @param features Features to plot.
+#' @param within_groups Separate color scales per group.
+#' @param grouping.var,numerator Extra grouping variable (e.g. condition) and
+#' the level used as numerator.
+#' @param cells Cell names to include.
+#' @param aggregate_fun Function used to aggregate expression within groups.
+#' @param exp_cutoff Expression cutoff for cell counting when `add_dot = TRUE`.
+#' @param border Draw borders. Kept for compatibility; more specific
+#' `*_border` arguments inherit this when `NULL`.
+#' @param heatmap_border,cell_annotation_border,feature_annotation_border
+#' Borders for the heatmap body, annotations, and their matching legends.
+#' `NULL` inherits `border`.
+#' @param heatmap_border_palcolor,cell_annotation_border_palcolor,feature_annotation_border_palcolor
+#' Border colors for the matching body, annotation, and legend.
+#' @param heatmap_border_size,cell_annotation_border_size,feature_annotation_border_size
+#' Border line widths for the matching body, annotation, and legend.
+#' @param flip Flip rows and columns.
+#' @param layer Assay layer to use.
+#' @param exp_method Expression transform: `"zscore"`, `"raw"`, `"fc"`, `"log2fc"`,
+#' or `"log1p"`.
+#' @param exp_legend_title Legend title for expression.
+#' @param limits Color-scale limits (length 2).
+#' @param lib_normalize,libsize Library-size normalization and per-cell library sizes.
+#' @param feature_split,feature_split_by,n_split,split_order,split_method,decreasing
+#' Feature splitting. `split_method` is `"kmeans"`, `"hclust"`, or `"mfuzz"`.
+#' @param fuzzification Mfuzz fuzzification coefficient.
+#' @param cluster_features_by Grouping used when clustering features. `NULL` uses all groups.
+#' @param cluster_rows,cluster_columns,cluster_row_slices,cluster_column_slices Heatmap clustering.
+#' @param show_row_names,show_column_names,row_names_wrap Show names. `row_names_wrap`
+#' wraps displayed names (underscores as spaces) without changing feature IDs.
+#' @param row_names_side,column_names_side,row_names_rot,column_names_rot Name placement.
+#' @param row_title,column_title,row_title_side,column_title_side,row_title_rot,column_title_rot
+#' Slice titles.
+#' @param anno_terms,anno_keys,anno_features Enrichment annotations.
+#' @param terms_width,terms_stat_width,terms_fontsize Term annotation size.
+#' @param terms_stat Enrichment statistic for term bars: `"none"`, `"score"`
+#' (`-log10` of the active p-value), or an enrichment column such as `"p.adjust"`.
+#' @param terms_stat_digits,terms_stat_label,terms_stat_axis Statistic labels
+#' (`"none"`, `"value"`, `"significance"`, `"both"`) and shared axis.
+#' @param terms_stat_background_palcolor,terms_stat_border,terms_stat_border_palcolor,terms_stat_border_size,terms_stat_label_palcolor
+#' Statistic-panel appearance. `NULL` inherits the matching `terms_*` setting.
+#' @param terms_group_background,terms_background_palcolor,terms_background_alpha,terms_border,terms_border_palcolor,terms_border_size,terms_text_palcolor,terms_bar_palcolor
+#' Term-block appearance. `terms_text_palcolor = NULL` maps text to enrichment
+#' significance; `terms_bar_palcolor = NULL` matches bar color to term text.
+#' @param keys_width,keys_fontsize,features_width,features_fontsize Key and feature annotations.
+#' @param IDtype,species,db_combine,mirror,db,TERM2GENE,TERM2NAME,minGSSize,maxGSSize
+#' Gene-set database (see [PrepareDB]).
+#' @param GO_simplify,GO_simplify_cutoff,simplify_method,simplify_similarityCutoff GO simplification.
+#' @param pvalueCutoff,padjustCutoff,topTerm,show_termid,topWord,words_excluded Enrichment filters.
+#' @param nlabel,features_label,label_size,label_color Feature labels.
+#' @param add_bg,bg_alpha Split-group background.
+#' @param add_dot,dot_size Dots sized by the fraction of cells above `exp_cutoff`.
+#' @param add_reticle,reticle_color Cell reticles.
+#' @param add_violin,fill.by,fill_palette,fill_palcolor Overlay violins.
+#' `fill.by` is `"group"`, `"feature"`, or `"expression"`.
+#' @param heatmap_palette,heatmap_palcolor,group_palette,group_palcolor Heatmap and group colors.
+#' @param cell_split_palette,cell_split_palcolor,feature_split_palette,feature_split_palcolor Split colors.
+#' @param cell_annotation,cell_annotation_palette,cell_annotation_palcolor,cell_annotation_params
+#' Cell annotations. Palette length should match `cell_annotation`.
+#' @param feature_annotation,feature_annotation_palette,feature_annotation_palcolor,feature_annotation_params
+#' Feature annotations. Palette length should match `feature_annotation`.
+#' @param use_raster,raster_device,raster_by_magick Raster device (`NULL` chooses automatically).
+#' @param width,height,units Heatmap size. `NULL` sizes from matrix dimensions.
+#' @param legend.position Legend side (`"right"`, `"left"`, `"top"`, `"bottom"`).
+#' Gap to the heatmap grows automatically when long row names are on the right.
+#' @param ht_params Extra arguments passed to [ComplexHeatmap::Heatmap], overriding defaults.
+#' @param ... Additional arguments passed to helper functions.
+#'
+#' @seealso [RunDEtest]
+#'
+#' @return A list with `plot`, `matrix_list`, `feature_split`, `cell_metadata`,
+#' `feature_metadata`, and `enrichment` (from [RunEnrichment] when term/key/feature
+#' annotations are requested).
+#'
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' ht1 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = c(
+#'     "Sox9", "Anxa2", "Bicc1", # Ductal
+#'     "Neurog3", "Hes6", # EPs
+#'     "Fev", "Neurod1", # Pre-endocrine
+#'     "Rbp4", "Pyy", # Endocrine
+#'     "Ins1", "Gcg", "Sst", "Ghrl"
+#'     # Beta, Alpha, Delta, Epsilon
+#'   ),
+#'   group.by = c("CellType", "SubCellType")
+#' )
+#' ht1$plot
+#'
+#' thisplot::panel_fix(
+#'   ht1$plot,
+#'   height = 4,
+#'   width = 6,
+#'   raster = TRUE,
+#'   dpi = 50
+#' )
+#'
+#' pancreas_sub <- AnnotateFeatures(
+#'   pancreas_sub,
+#'   species = "Mus_musculus",
+#'   db = c("CSPA", "TF")
+#' )
+#' pancreas_sub <- RunDEtest(
+#'   pancreas_sub,
+#'   group.by = "CellType"
+#' )
+#' de_filter <- dplyr::filter(
+#'   pancreas_sub@tools$DEtest_CellType$AllMarkers_wilcox,
+#'   p_val_adj < 0.05 & avg_log2FC > 1
+#' )
+#'
+#' ht2 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = de_filter$gene,
+#'   group.by = "CellType",
+#'   split.by = "Phase",
+#'   cell_split_palette = "Dark2",
+#'   cluster_rows = TRUE,
+#'   cluster_columns = TRUE
+#' )
+#' ht2$plot
+#'
+#' ht3 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = de_filter$gene,
+#'   feature_split = de_filter$group1,
+#'   group.by = "CellType",
+#'   species = "Mus_musculus",
+#'   db = "GO_BP",
+#'   anno_terms = TRUE,
+#'   anno_keys = TRUE,
+#'   anno_features = TRUE
+#' )
+#' ht3$plot
+#'
+#' de_top <- de_filter |>
+#'   dplyr::group_by(gene) |>
+#'   dplyr::top_n(1, avg_log2FC) |>
+#'   dplyr::group_by(group1) |>
+#'   dplyr::top_n(3, avg_log2FC)
+#' ht4 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = de_top$gene,
+#'   feature_split = de_top$group1,
+#'   group.by = "CellType",
+#'   heatmap_palette = "YlOrRd",
+#'   cell_annotation = c(
+#'     "Phase", "G2M_score", "Neurod2"
+#'   ),
+#'   cell_annotation_palette = c(
+#'     "Dark2", "Chinese", "Chinese"
+#'   ),
+#'   cell_annotation_params = list(
+#'     height = grid::unit(10, "mm")
+#'   ),
+#'   feature_annotation = c("TF", "CSPA"),
+#'   feature_annotation_palcolor = list(
+#'     c("gold", "steelblue"),
+#'     c("forestgreen")
+#'   ),
+#'   add_dot = TRUE,
+#'   add_bg = TRUE,
+#'   nlabel = 0,
+#'   show_row_names = TRUE
+#' )
+#' ht4$plot
+#'
+#' ht5 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = de_top$gene,
+#'   feature_split = de_top$group1,
+#'   group.by = "CellType",
+#'   heatmap_palette = "YlOrRd",
+#'   cell_annotation = c(
+#'     "Phase", "G2M_score", "Neurod2"
+#'   ),
+#'   cell_annotation_palette = c(
+#'     "Dark2", "Chinese", "Chinese"
+#'   ),
+#'   cell_annotation_params = list(
+#'     width = grid::unit(10, "mm")
+#'   ),
+#'   feature_annotation = c("TF", "CSPA"),
+#'   feature_annotation_palcolor = list(
+#'     c("gold", "steelblue"), c("forestgreen")
+#'   ),
+#'   add_dot = TRUE,
+#'   add_bg = TRUE,
+#'   flip = TRUE,
+#'   column_title_rot = 45,
+#'   nlabel = 0,
+#'   show_row_names = TRUE
+#' )
+#' ht5$plot
+#'
+#' ht6 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = de_top$gene,
+#'   feature_split = de_top$group1,
+#'   group.by = "CellType",
+#'   add_violin = TRUE,
+#'   cluster_rows = TRUE,
+#'   nlabel = 0,
+#'   show_row_names = TRUE
+#' )
+#' ht6$plot
+#'
+#' ht7 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = de_top$gene,
+#'   feature_split = de_top$group1,
+#'   group.by = "CellType",
+#'   add_violin = TRUE,
+#'   fill.by = "expression",
+#'   fill_palette = "Blues",
+#'   cluster_rows = TRUE,
+#'   nlabel = 0,
+#'   show_row_names = TRUE
+#' )
+#' ht7$plot
+#'
+#' ht8 <- GroupHeatmap(
+#'   pancreas_sub,
+#'   features = de_top$gene,
+#'   group.by = "CellType",
+#'   split.by = "Phase",
+#'   n_split = 4,
+#'   cluster_rows = TRUE,
+#'   cluster_columns = TRUE,
+#'   cluster_row_slices = TRUE,
+#'   cluster_column_slices = TRUE,
+#'   add_dot = TRUE,
+#'   add_reticle = TRUE,
+#'   heatmap_palette = "viridis",
+#'   nlabel = 0,
+#'   show_row_names = TRUE,
+#'   ht_params = list(
+#'     row_gap = grid::unit(0, "mm"),
+#'     row_names_gp = grid::gpar(fontsize = 10)
+#'   )
+#' )
+#' ht8$plot
+GroupHeatmap <- function(
+  object,
+  features = NULL,
+  group.by = NULL,
+  split.by = NULL,
+  within_groups = FALSE,
+  grouping.var = NULL,
+  numerator = NULL,
+  cells = NULL,
+  aggregate_fun = base::mean,
+  exp_cutoff = 0,
+  border = TRUE,
+  heatmap_border = NULL,
+  cell_annotation_border = NULL,
+  feature_annotation_border = NULL,
+  heatmap_border_palcolor = "black",
+  cell_annotation_border_palcolor = "black",
+  feature_annotation_border_palcolor = "black",
+  heatmap_border_size = 1,
+  cell_annotation_border_size = 1,
+  feature_annotation_border_size = 1,
+  flip = FALSE,
+  layer = "counts",
+  assay = NULL,
+  exp_method = c("zscore", "raw", "fc", "log2fc", "log1p"),
+  exp_legend_title = NULL,
+  limits = NULL,
+  lib_normalize = identical(layer, "counts"),
+  libsize = NULL,
+  feature_split = NULL,
+  feature_split_by = NULL,
+  n_split = NULL,
+  split_order = NULL,
+  split_method = c("kmeans", "hclust", "mfuzz"),
+  decreasing = FALSE,
+  fuzzification = NULL,
+  cluster_features_by = NULL,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  cluster_row_slices = FALSE,
+  cluster_column_slices = FALSE,
+  show_row_names = FALSE,
+  row_names_wrap = NULL,
+  show_column_names = FALSE,
+  row_names_side = ifelse(flip, "left", "right"),
+  column_names_side = ifelse(flip, "bottom", "top"),
+  row_names_rot = 0,
+  column_names_rot = 90,
+  row_title = NULL,
+  column_title = NULL,
+  row_title_side = "left",
+  column_title_side = "top",
+  row_title_rot = 0,
+  column_title_rot = ifelse(flip, 90, 0),
+  anno_terms = FALSE,
+  anno_keys = FALSE,
+  anno_features = FALSE,
+  terms_width = grid::unit(4, "in"),
+  terms_stat_width = grid::unit(1.35, "in"),
+  terms_fontsize = 8,
+  terms_stat = "none",
+  terms_stat_digits = 2,
+  terms_stat_label = "value",
+  terms_stat_axis = FALSE,
+  terms_stat_background_palcolor = NULL,
+  terms_stat_border = NULL,
+  terms_stat_border_palcolor = NULL,
+  terms_stat_border_size = NULL,
+  terms_stat_label_palcolor = NULL,
+  terms_group_background = FALSE,
+  terms_background_palcolor = "grey98",
+  terms_background_alpha = 1,
+  terms_border = TRUE,
+  terms_border_palcolor = "black",
+  terms_border_size = 0.8,
+  terms_text_palcolor = NULL,
+  terms_bar_palcolor = NULL,
+  keys_width = grid::unit(2, "in"),
+  keys_fontsize = c(6, 10),
+  features_width = grid::unit(2, "in"),
+  features_fontsize = c(6, 10),
+  IDtype = "symbol",
+  species = "Homo_sapiens",
+  db_update = FALSE,
+  db_version = "latest",
+  db_combine = FALSE,
+  convert_species = TRUE,
+  Ensembl_version = NULL,
+  mirror = NULL,
+  db = "GO_BP",
+  TERM2GENE = NULL,
+  TERM2NAME = NULL,
+  minGSSize = 10,
+  maxGSSize = 500,
+  GO_simplify = FALSE,
+  GO_simplify_cutoff = "p.adjust < 0.05",
+  simplify_method = "Wang",
+  simplify_similarityCutoff = 0.7,
+  pvalueCutoff = NULL,
+  padjustCutoff = 0.05,
+  topTerm = 5,
+  show_termid = FALSE,
+  topWord = 20,
+  words_excluded = NULL,
+  nlabel = 20,
+  features_label = NULL,
+  label_size = 10,
+  label_color = "black",
+  add_bg = FALSE,
+  bg_alpha = 0.5,
+  add_dot = FALSE,
+  dot_size = grid::unit(8, "mm"),
+  add_reticle = FALSE,
+  reticle_color = "grey",
+  add_violin = FALSE,
+  fill.by = "feature",
+  fill_palette = "Dark2",
+  fill_palcolor = NULL,
+  heatmap_palette = "RdBu",
+  heatmap_palcolor = NULL,
+  group_palette = "Chinese",
+  group_palcolor = NULL,
+  cell_split_palette = "simspec",
+  cell_split_palcolor = NULL,
+  feature_split_palette = "simspec",
+  feature_split_palcolor = NULL,
+  cell_annotation = NULL,
+  cell_annotation_palette = "Chinese",
+  cell_annotation_palcolor = NULL,
+  cell_annotation_params = if (flip) {
+    list(width = grid::unit(10, "mm"))
+  } else {
+    list(height = grid::unit(10, "mm"))
+  },
+  feature_annotation = NULL,
+  feature_annotation_palette = "Dark2",
+  feature_annotation_palcolor = NULL,
+  feature_annotation_params = if (flip) {
+    list(height = grid::unit(5, "mm"))
+  } else {
+    list(width = grid::unit(5, "mm"))
+  },
+  use_raster = NULL,
+  raster_device = "png",
+  raster_by_magick = FALSE,
+  height = NULL,
+  width = NULL,
+  units = "inch",
+  seed = 11,
+  legend.position = "right",
+  ht_params = list(),
+  verbose = TRUE,
+  ...,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  set.seed(seed)
+  borders <- prepare_heatmap_borders(
+    border = border,
+    heatmap_border = heatmap_border,
+    cell_annotation_border = cell_annotation_border,
+    feature_annotation_border = feature_annotation_border,
+    heatmap_border_palcolor = heatmap_border_palcolor,
+    cell_annotation_border_palcolor = cell_annotation_border_palcolor,
+    feature_annotation_border_palcolor = feature_annotation_border_palcolor,
+    heatmap_border_size = heatmap_border_size,
+    cell_annotation_border_size = cell_annotation_border_size,
+    feature_annotation_border_size = feature_annotation_border_size
+  )
+  heatmap_border <- borders$heatmap_border
+  cell_annotation_border <- borders$cell_annotation_border
+  feature_annotation_border <- borders$feature_annotation_border
+  heatmap_border_color <- borders$heatmap_border_color
+  cell_annotation_border_color <- borders$cell_annotation_border_color
+  feature_annotation_border_color <- borders$feature_annotation_border_color
+  heatmap_border_size <- borders$heatmap_border_size
+  cell_annotation_border_size <- borders$cell_annotation_border_size
+  feature_annotation_border_size <- borders$feature_annotation_border_size
+
+  if (isTRUE(raster_by_magick)) {
+    check_r("magick", verbose = FALSE)
+  }
+  if (is.null(features)) {
+    log_message(
+      "{.arg features} is not provided.",
+      message_type = "error"
+    )
+  }
+
+  split_method <- match.arg(split_method)
+  data_nm <- c(ifelse(isTRUE(lib_normalize), "normalized", ""), layer)
+  data_nm <- paste(data_nm[data_nm != ""], collapse = " ")
+  if (length(exp_method) == 1 && is.function(exp_method)) {
+    exp_name <- paste0(
+      as.character(x = formals()$exp_method),
+      "(",
+      data_nm,
+      ")"
+    )
+  } else {
+    exp_method <- match.arg(exp_method)
+    exp_name <- paste0(exp_method, "(", data_nm, ")")
+  }
+
+  if (!is.null(grouping.var) && exp_method != "log2fc") {
+    log_message(
+      "When 'grouping.var' is specified, 'exp_method' can only be 'log2fc'",
+      message_type = "warning",
+      verbose = verbose
+    )
+    exp_method <- "log2fc"
+  }
+  exp_name <- exp_legend_title %||% exp_name
+
+  if (!is.null(grouping.var)) {
+    if (identical(split.by, grouping.var)) {
+      log_message(
+        "{.arg grouping.var} must be different from {.arg split.by}",
+        message_type = "error"
+      )
+    }
+    if (!is.factor(srt@meta.data[[grouping.var]])) {
+      srt@meta.data[[grouping.var]] <- factor(
+        srt@meta.data[[grouping.var]],
+        levels = unique(srt@meta.data[[grouping.var]])
+      )
+    }
+    if (is.null(numerator)) {
+      numerator <- levels(srt@meta.data[[grouping.var]])[1]
+      log_message(
+        "{.arg numerator} is not specified. Use the first level in {.arg grouping.var}: {.val {numerator}}",
+        numerator,
+        message_type = "warning",
+        verbose = verbose
+      )
+    } else {
+      if (!numerator %in% levels(srt@meta.data[, grouping.var])) {
+        log_message(
+          "{.arg numerator} is not an element of the {.arg grouping.var}",
+          message_type = "error"
+        )
+      }
+    }
+    srt@meta.data[["grouping.var.use"]] <- srt@meta.data[[grouping.var]] ==
+      numerator
+    add_dot <- FALSE
+    exp_name <- paste0(numerator, "/", "other\n", exp_method, "(", data_nm, ")")
+  }
+
+  assay <- assay %||% DefaultAssay(srt)
+  assay_use <- Seurat::GetAssay(srt, assay = assay)
+
+  if (is.null(group.by)) {
+    srt@meta.data[["All.groups"]] <- factor("")
+    group.by <- "All.groups"
+  }
+
+  if (any(!group.by %in% colnames(srt@meta.data))) {
+    log_message(
+      group.by[!group.by %in% colnames(srt@meta.data)],
+      " is not in the meta data of {.cls Seurat}.",
+      message_type = "error"
+    )
+  }
+
+  if (!is.null(group.by)) {
+    for (g in group.by) {
+      if (!is.factor(srt@meta.data[[g]])) {
+        srt@meta.data[[g]] <- factor(
+          srt@meta.data[[g]],
+          levels = unique(srt@meta.data[[g]])
+        )
+      }
+    }
+  }
+
+  if (length(split.by) > 1) {
+    log_message(
+      "{.arg split.by} only support one variable",
+      message_type = "error"
+    )
+  }
+  if (any(!split.by %in% colnames(srt@meta.data))) {
+    log_message(
+      split.by[!split.by %in% colnames(srt@meta.data)],
+      " is not in the meta data of {.cls Seurat}.",
+      message_type = "error"
+    )
+  }
+  if (!is.null(split.by)) {
+    if (!is.factor(srt@meta.data[[split.by]])) {
+      srt@meta.data[[split.by]] <- factor(
+        srt@meta.data[[split.by]],
+        levels = unique(srt@meta.data[[split.by]])
+      )
+    }
+  }
+  group_elements <- unlist(lapply(
+    srt@meta.data[, group.by, drop = FALSE],
+    function(x) length(unique(x))
+  ))
+
+  if (any(group_elements == 1) && exp_method == "zscore") {
+    log_message(
+      "{.arg exp_method} {.val zscore} cannot be applied to the group(s) consisting of one element: ",
+      paste0(names(group_elements)[group_elements == 1], collapse = ","),
+      message_type = "error"
+    )
+  }
+  if (length(group_palette) == 1) {
+    group_palette <- rep(group_palette, length(group.by))
+  }
+  if (length(group_palette) != length(group.by)) {
+    log_message(
+      "{.arg group_palette} must be the same length as {.arg group.by}",
+      message_type = "error"
+    )
+  }
+  group_palette <- stats::setNames(group_palette, nm = group.by)
+  if (!is.null(group_palcolor)) {
+    if (!is.list(group_palcolor)) {
+      if (length(group.by) == 1) {
+        group_palcolor <- list(group_palcolor)
+      } else {
+        log_message(
+          "'group_palcolor' must be a list of the same length as 'group.by' when specifying custom colors for multiple groups.",
+          message_type = "error"
+        )
+      }
+    }
+    if (length(group_palcolor) != length(group.by)) {
+      log_message(
+        "'group_palcolor' must be the same length as 'group.by'.",
+        message_type = "error"
+      )
+    }
+  }
+  raw_group_by <- group.by
+  raw_group_palette <- group_palette
+  if (isTRUE(within_groups)) {
+    new.group.by <- c()
+    new.group_palette <- group_palette
+    new.group_palcolor <- if (!is.null(group_palcolor)) list() else NULL
+    for (g in group.by) {
+      j <- match(g, group.by)
+      groups <- split(colnames(srt), srt[[g, drop = TRUE]])
+      new.group_palette[g] <- list(rep(new.group_palette[g], length(groups)))
+      for (nm in names(groups)) {
+        srt[[make.names(nm)]] <- factor(
+          NA,
+          levels = levels(srt[[g, drop = TRUE]])
+        )
+        srt[[make.names(nm)]][colnames(srt) %in% groups[[nm]], ] <- nm
+        new.group.by <- c(new.group.by, make.names(nm))
+        if (!is.null(new.group_palcolor)) {
+          new.group_palcolor <- c(new.group_palcolor, list(group_palcolor[[j]]))
+        }
+      }
+    }
+    group.by <- new.group.by
+    group_palette <- unlist(new.group_palette)
+    if (!is.null(new.group_palcolor)) {
+      group_palcolor <- new.group_palcolor
+    }
+  }
+
+  if (!is.null(feature_split) && !is.factor(feature_split)) {
+    feature_split <- factor(feature_split, levels = unique(feature_split))
+  }
+  if (length(feature_split) != 0 && length(feature_split) != length(features)) {
+    log_message(
+      "{.arg feature_split} must be the same length as {.arg features}",
+      message_type = "error"
+    )
+  }
+  if (is.null(feature_split_by)) {
+    feature_split_by <- group.by
+  }
+  if (any(!feature_split_by %in% group.by)) {
+    log_message(
+      "{.arg feature_split_by} must be a subset of {.arg group.by}",
+      message_type = "error"
+    )
+  }
+  if (!is.null(cell_annotation)) {
+    if (length(cell_annotation_palette) == 1) {
+      cell_annotation_palette <- rep(
+        cell_annotation_palette,
+        length(cell_annotation)
+      )
+    }
+    if (length(cell_annotation_palcolor) == 1) {
+      cell_annotation_palcolor <- rep(
+        cell_annotation_palcolor,
+        length(cell_annotation)
+      )
+    }
+    npal <- unique(c(
+      length(cell_annotation_palette),
+      length(cell_annotation_palcolor),
+      length(cell_annotation)
+    ))
+    if (length(npal[npal != 0]) > 1) {
+      log_message(
+        "{.arg cell_annotation_palette} and {.arg cell_annotation_palcolor} must be the same length as {.arg cell_annotation}",
+        message_type = "error"
+      )
+    }
+    if (
+      any(
+        !cell_annotation %in%
+          c(colnames(srt@meta.data), rownames(assay_use))
+      )
+    ) {
+      log_message(
+        "cell_annotation: ",
+        paste0(
+          cell_annotation[
+            !cell_annotation %in%
+              c(colnames(srt@meta.data), rownames(assay_use))
+          ],
+          collapse = ","
+        ),
+        " is not in {.cls Seurat}.",
+        message_type = "error"
+      )
+    }
+  }
+  feature_annotation_data <- GetFeaturesData(
+    srt,
+    assay = assay
+  )
+  if (!is.null(feature_annotation)) {
+    if (length(feature_annotation_palette) == 1) {
+      feature_annotation_palette <- rep(
+        feature_annotation_palette,
+        length(feature_annotation)
+      )
+    }
+    if (length(feature_annotation_palcolor) == 1) {
+      feature_annotation_palcolor <- rep(
+        feature_annotation_palcolor,
+        length(feature_annotation)
+      )
+    }
+    npal <- unique(c(
+      length(feature_annotation_palette),
+      length(feature_annotation_palcolor),
+      length(feature_annotation)
+    ))
+    if (length(npal[npal != 0]) > 1) {
+      log_message(
+        "{.arg feature_annotation_palette} and {.arg feature_annotation_palcolor} must be the same length as {.arg feature_annotation}",
+        message_type = "error"
+      )
+    }
+    if (any(!feature_annotation %in% colnames(feature_annotation_data))) {
+      log_message(
+        "{.arg feature_annotation}: ",
+        paste0(
+          feature_annotation[
+            !feature_annotation %in% colnames(feature_annotation_data)
+          ],
+          collapse = ","
+        ),
+        " is not in the meta data of the ",
+        assay,
+        " assay in {.cls Seurat}.",
+        message_type = "error"
+      )
+    }
+  }
+
+  if (length(width) == 1) {
+    width <- rep(width, length(group.by))
+  }
+  if (length(height) == 1) {
+    height <- rep(height, length(group.by))
+  }
+  if (length(width) >= 1) {
+    names(width) <- group.by
+  }
+  if (length(height) >= 1) {
+    names(height) <- group.by
+  }
+
+  if (!is.null(cell_annotation_params)) {
+    if (
+      isTRUE(flip) &&
+        !"width" %in% names(cell_annotation_params) &&
+        "height" %in% names(cell_annotation_params)
+    ) {
+      cell_annotation_params[["width"]] <- cell_annotation_params[["height"]]
+      cell_annotation_params[["height"]] <- NULL
+      log_message(
+        "When {.arg flip = TRUE}, {.arg cell_annotation_params$height} is interpreted as {.arg cell_annotation_params$width}.",
+        message_type = "warning",
+        verbose = verbose
+      )
+    }
+    if (
+      !isTRUE(flip) &&
+        !"height" %in% names(cell_annotation_params) &&
+        "width" %in% names(cell_annotation_params)
+    ) {
+      cell_annotation_params[["height"]] <- cell_annotation_params[["width"]]
+      cell_annotation_params[["width"]] <- NULL
+      log_message(
+        "When {.arg flip = FALSE}, {.arg cell_annotation_params$width} is interpreted as {.arg cell_annotation_params$height}.",
+        message_type = "warning",
+        verbose = verbose
+      )
+    }
+  }
+
+  if (isTRUE(flip)) {
+    cluster_rows_raw <- cluster_rows
+    cluster_columns_raw <- cluster_columns
+    cluster_row_slices_raw <- cluster_row_slices
+    cluster_column_slices_raw <- cluster_column_slices
+    cluster_rows <- cluster_columns_raw
+    cluster_columns <- cluster_rows_raw
+    cluster_row_slices <- cluster_column_slices_raw
+    cluster_column_slices <- cluster_row_slices_raw
+  }
+
+  if (is.null(cells)) {
+    cells <- colnames(assay_use)
+  }
+  if (all(!cells %in% colnames(assay_use))) {
+    log_message(
+      "No cells found",
+      message_type = "error"
+    )
+  }
+  if (!all(cells %in% colnames(assay_use))) {
+    log_message(
+      "Some cells not found",
+      message_type = "warning",
+      verbose = verbose
+    )
+  }
+  cells <- intersect(cells, colnames(assay_use))
+
+  if (is.null(features)) {
+    features <- SeuratObject::VariableFeatures(
+      srt,
+      assay = assay
+    )
+  }
+  index <- features %in% c(rownames(assay_use), colnames(srt@meta.data))
+  features <- features[index]
+  features_unique <- make.unique(features)
+  if (!is.null(feature_split)) {
+    feature_split <- feature_split[index]
+    names(feature_split) <- features_unique
+  }
+
+  cell_groups <- list()
+  for (cell_group in group.by) {
+    if (!is.factor(srt@meta.data[[cell_group]])) {
+      srt@meta.data[[cell_group]] <- factor(
+        srt@meta.data[[cell_group]],
+        levels = unique(srt@meta.data[[cell_group]])
+      )
+    }
+    cell_groups[[cell_group]] <- stats::setNames(
+      srt@meta.data[cells, cell_group],
+      cells
+    )
+    cell_groups[[cell_group]] <- stats::na.omit(cell_groups[[cell_group]])
+    cell_groups[[cell_group]] <- factor(
+      cell_groups[[cell_group]],
+      levels = levels(cell_groups[[cell_group]])[
+        levels(cell_groups[[cell_group]]) %in% cell_groups[[cell_group]]
+      ]
+    )
+
+    if (!is.null(split.by)) {
+      if (!is.factor(srt@meta.data[[split.by]])) {
+        srt@meta.data[[split.by]] <- factor(
+          srt@meta.data[[split.by]],
+          levels = unique(srt@meta.data[[split.by]])
+        )
+      }
+      levels <- apply(
+        expand.grid(
+          levels(srt@meta.data[[split.by]]),
+          levels(cell_groups[[cell_group]])
+        ),
+        1,
+        function(x) paste0(x[2:1], collapse = " : ")
+      )
+      cell_groups[[cell_group]] <- stats::setNames(
+        paste0(
+          cell_groups[[cell_group]][cells],
+          " : ",
+          srt@meta.data[cells, split.by]
+        ),
+        cells
+      )
+      cell_groups[[cell_group]] <- factor(
+        cell_groups[[cell_group]],
+        levels = levels[levels %in% cell_groups[[cell_group]]]
+      )
+    }
+
+    if (!is.null(grouping.var)) {
+      levels <- apply(
+        expand.grid(c("TRUE", "FALSE"), levels(cell_groups[[cell_group]])),
+        1,
+        function(x) paste0(x[2:1], collapse = " ; ")
+      )
+      cell_groups[[cell_group]] <- stats::setNames(
+        paste0(
+          cell_groups[[cell_group]][cells],
+          " ; ",
+          srt@meta.data[cells, "grouping.var.use"]
+        ),
+        cells
+      )
+      cell_groups[[cell_group]] <- factor(
+        cell_groups[[cell_group]],
+        levels = levels[levels %in% cell_groups[[cell_group]]]
+      )
+    }
+  }
+
+  gene <- features[features %in% rownames(assay_use)]
+  gene_unique <- features_unique[features %in% rownames(assay_use)]
+  meta <- features[features %in% colnames(srt@meta.data)]
+
+  gene_mat <- if (length(gene) > 0) {
+    GetAssayData5(
+      srt,
+      assay = assay,
+      layer = layer,
+      features = gene,
+      cells = cells
+    )[gene, cells, drop = FALSE]
+  } else {
+    matrix(0, nrow = 0, ncol = length(cells), dimnames = list(character(0), cells))
+  }
+  meta_mat <- if (length(meta) > 0) {
+    Matrix::t(srt@meta.data[cells, meta, drop = FALSE])
+  } else {
+    matrix(0, nrow = 0, ncol = length(cells), dimnames = list(character(0), cells))
+  }
+  mat_raw <- as_matrix(rbind(gene_mat, meta_mat))[features, , drop = FALSE]
+  rownames(mat_raw) <- features_unique
+  if (isTRUE(lib_normalize) && min(mat_raw, na.rm = TRUE) >= 0) {
+    if (!is.null(libsize)) {
+      libsize_use <- libsize
+    } else {
+      count_col <- paste0("nCount_", assay)
+      if (count_col %in% colnames(srt@meta.data)) {
+        libsize_use <- srt@meta.data[colnames(mat_raw), count_col]
+      } else {
+        libsize_use <- Matrix::colSums(
+          GetAssayData5(
+            srt,
+            assay = assay,
+            layer = "counts",
+            cells = colnames(mat_raw)
+          )
+        )
+      }
+      isfloat <- any(libsize_use %% 1 != 0, na.rm = TRUE)
+      if (isTRUE(isfloat)) {
+        libsize_use <- rep(1, length(libsize_use))
+        log_message(
+          "The values in the {.val counts} layer are non-integer. Set the library size to {.val 1}",
+          message_type = "warning",
+          verbose = verbose
+        )
+        if (!is.null(grouping.var)) {
+          exp_name <- paste0(
+            numerator,
+            "/",
+            "other\n",
+            exp_method,
+            "(",
+            layer,
+            ")"
+          )
+        } else {
+          exp_name <- paste0(exp_method, "(", layer, ")")
+        }
+      }
+    }
+    mat_raw[gene_unique, ] <- Matrix::t(
+      Matrix::t(
+        mat_raw[gene_unique, , drop = FALSE]
+      ) /
+        libsize_use *
+        stats::median(libsize_use)
+    )
+  }
+
+  mat_raw_list <- list()
+  mat_perc_list <- list()
+  for (cell_group in names(cell_groups)) {
+    mat_tmp <- group_heatmap_aggregate_matrix(
+      mat = mat_raw[features_unique, , drop = FALSE],
+      groups = cell_groups[[cell_group]][colnames(mat_raw)],
+      aggregate_fun = aggregate_fun
+    )
+    mat_raw_list[[cell_group]] <- mat_tmp
+
+    mat_perc <- group_heatmap_expression_fraction(
+      mat = mat_raw[features_unique, , drop = FALSE],
+      groups = cell_groups[[cell_group]][colnames(mat_raw)],
+      exp_cutoff = exp_cutoff
+    )
+    if (isTRUE(flip)) {
+      mat_perc <- Matrix::t(mat_perc)
+    }
+    mat_perc_list[[cell_group]] <- mat_perc
+  }
+
+  all_agg <- do.call(cbind, mat_raw_list)
+  gene_mean <- rowMeans(all_agg, na.rm = TRUE)
+  gene_sd <- apply(all_agg, 1L, stats::sd, na.rm = TRUE)
+  gene_sd[!is.finite(gene_sd) | gene_sd < 1e-10] <- 1
+
+  mat_list <- list()
+  for (cell_group in group.by) {
+    mat_tmp <- mat_raw_list[[cell_group]]
+    if (is.null(grouping.var)) {
+      if (
+        ncol(mat_tmp) == 1L &&
+          !is.function(exp_method) &&
+          exp_method %in% c("zscore", "log2fc")
+      ) {
+        mat_tmp <- (mat_tmp - gene_mean[rownames(mat_tmp)]) /
+          gene_sd[rownames(mat_tmp)]
+      } else {
+        mat_tmp <- matrix_process(mat_tmp, method = exp_method)
+      }
+      finite_vals <- mat_tmp[!is.infinite(mat_tmp) & !is.na(mat_tmp)]
+      repl <- if (length(finite_vals) > 0L) {
+        max(abs(finite_vals), na.rm = TRUE)
+      } else {
+        1
+      }
+      if (!is.finite(repl)) {
+        repl <- 1
+      }
+      mat_tmp[is.infinite(mat_tmp)] <- repl *
+        ifelse(mat_tmp[is.infinite(mat_tmp)] > 0, 1, -1)
+      mean_val <- mean(mat_tmp, na.rm = TRUE)
+      if (!is.finite(mean_val)) {
+        mean_val <- 0
+      }
+      mat_tmp[is.na(mat_tmp)] <- mean_val
+      mat_list[[cell_group]] <- mat_tmp
+    } else {
+      compare_groups <- strsplit(colnames(mat_tmp), " ; ")
+      names_keep <- names(which(
+        table(sapply(compare_groups, function(x) x[[1]])) == 2
+      ))
+      group_keep <- which(sapply(
+        compare_groups,
+        function(x) x[[1]] %in% names_keep
+      ))
+      group_TRUE <- intersect(
+        group_keep,
+        which(sapply(compare_groups, function(x) x[[2]]) == "TRUE")
+      )
+      group_FALSE <- intersect(
+        group_keep,
+        which(sapply(compare_groups, function(x) x[[2]]) == "FALSE")
+      )
+      mat_tmp <- log2(mat_tmp[, group_TRUE] / mat_tmp[, group_FALSE])
+      colnames(mat_tmp) <- gsub(" ; .*", "", colnames(mat_tmp))
+      finite_vals <- mat_tmp[!is.infinite(mat_tmp) & !is.na(mat_tmp)]
+      repl <- if (length(finite_vals) > 0L) {
+        max(abs(finite_vals), na.rm = TRUE)
+      } else {
+        1
+      }
+      if (!is.finite(repl)) {
+        repl <- 1
+      }
+      mat_tmp[is.infinite(mat_tmp)] <- repl *
+        ifelse(mat_tmp[is.infinite(mat_tmp)] > 0, 1, -1)
+      mat_tmp[is.na(mat_tmp)] <- 0
+      mat_list[[cell_group]] <- mat_tmp
+      cell_groups[[cell_group]] <- factor(
+        gsub(" ; .*", "", cell_groups[[cell_group]]),
+        levels = unique(gsub(" ; .*", "", levels(cell_groups[[cell_group]])))
+      )
+    }
+  }
+
+  mat_split <- do.call(cbind, mat_list[feature_split_by])
+  combined_mat <- do.call(cbind, mat_list)
+  col_groups <- rep(names(mat_list), times = vapply(mat_list, ncol, integer(1)))
+
+  if (is.null(limits)) {
+    if (!is.function(exp_method) && exp_method %in% c("zscore", "log2fc")) {
+      b <- ceiling(
+        min(
+          abs(
+            stats::quantile(combined_mat, c(0.01, 0.99), na.rm = TRUE)
+          ),
+          na.rm = TRUE
+        ) *
+          2
+      ) /
+        2
+      if (!is.finite(b) || b <= 0) {
+        b <- 2
+      }
+      colors <- circlize::colorRamp2(
+        seq(-b, b, length = 100),
+        palette_colors(palette = heatmap_palette, palcolor = heatmap_palcolor)
+      )
+    } else {
+      b <- stats::quantile(combined_mat, c(0.01, 0.99), na.rm = TRUE)
+      if (!all(is.finite(b)) || b[1] == b[2]) {
+        b <- c(0, 1)
+      }
+      colors <- circlize::colorRamp2(
+        seq(b[1], b[2], length = 100),
+        palette_colors(palette = heatmap_palette, palcolor = heatmap_palcolor)
+      )
+    }
+  } else {
+    colors <- circlize::colorRamp2(
+      seq(limits[1], limits[2], length = 100),
+      palette_colors(palette = heatmap_palette, palcolor = heatmap_palcolor)
+    )
+  }
+
+  cell_metadata <- cbind.data.frame(
+    data.frame(row.names = cells, cells = cells),
+    cbind.data.frame(
+      srt@meta.data[
+        cells,
+        c(group.by, intersect(cell_annotation, colnames(srt@meta.data))),
+        drop = FALSE
+      ],
+      Matrix::t(
+        if (length(intersect(cell_annotation, rownames(assay_use))) > 0) {
+          GetAssayData5(
+            srt,
+            assay = assay,
+            layer = "data",
+            features = intersect(cell_annotation, rownames(assay_use)),
+            cells = cells
+          )[
+            intersect(cell_annotation, rownames(assay_use)),
+            cells,
+            drop = FALSE
+          ]
+        } else {
+          matrix(0, nrow = 0, ncol = length(cells), dimnames = list(character(0), cells))
+        }
+      )
+    )
+  )
+  feature_metadata <- cbind.data.frame(
+    data.frame(
+      row.names = features_unique,
+      features = features,
+      features_uique = features_unique
+    ),
+    feature_annotation_data[
+      features,
+      intersect(
+        feature_annotation,
+        colnames(feature_annotation_data)
+      ),
+      drop = FALSE
+    ]
+  )
+  feature_metadata[, "duplicated"] <- feature_metadata[["features"]] %in%
+    features[duplicated(features)]
+
+  lgd <- list()
+  lgd[["ht"]] <- ComplexHeatmap::Legend(
+    title = exp_name,
+    col_fun = colors,
+    legend_gp = heatmap_border_gp(
+      heatmap_border,
+      heatmap_border_color,
+      heatmap_border_size
+    ),
+    border = heatmap_legend_border(
+      heatmap_border,
+      heatmap_border_color
+    )
+  )
+  if (isTRUE(add_dot)) {
+    lgd[["point"]] <- ComplexHeatmap::Legend(
+      labels = paste0(seq(20, 100, length.out = 5), "%"),
+      title = "Percent",
+      type = "points",
+      pch = 21,
+      size = dot_size * seq(0.2, 1, length.out = 5),
+      grid_height = dot_size * seq(0.2, 1, length.out = 5) * 0.8,
+      grid_width = dot_size,
+      legend_gp = grid::gpar(fill = "grey30"),
+      border = FALSE,
+      background = "transparent",
+      direction = "vertical"
+    )
+  }
+
+  ha_top_list <- NULL
+  cluster_columns_list <- list()
+  column_split_list <- list()
+  for (i in seq_along(group.by)) {
+    cell_group <- group.by[i]
+    cluster_columns_list[[cell_group]] <- cluster_columns
+    if (is.null(split.by)) {
+      column_split_list[[cell_group]] <- NULL
+    } else {
+      column_split_list[[cell_group]] <- factor(
+        gsub(" : .*", "", levels(cell_groups[[cell_group]])),
+        levels = levels(srt@meta.data[[cell_group]])
+      )
+    }
+    if (isTRUE(cluster_column_slices) && !is.null(split.by)) {
+      if (isFALSE(cluster_columns)) {
+        if (nlevels(column_split_list[[cell_group]]) == 1) {
+          log_message(
+            "cluster_column_slices=TRUE can not be used when there is only one group.",
+            message_type = "error"
+          )
+        }
+        dend <- ComplexHeatmap::cluster_within_group(
+          mat_list[[cell_group]],
+          column_split_list[[cell_group]]
+        )
+        cluster_columns_list[[cell_group]] <- dend
+        column_split_list[[cell_group]] <- length(unique(column_split_list[[
+          cell_group
+        ]]))
+      }
+    }
+
+    if (cell_group != "All.groups") {
+      block_graphics <- thisplot::annotation_block_fill_graphics(
+        levels = levels(srt@meta.data[[cell_group]]),
+        palette = group_palette[i],
+        palcolor = group_palcolor[[i]],
+        border = cell_annotation_border,
+        border_color = cell_annotation_border_color,
+        border_size = cell_annotation_border_size
+      )
+
+      anno <- list()
+      anno[[cell_group]] <- ComplexHeatmap::anno_block(
+        align_to = split(
+          seq_along(levels(cell_groups[[cell_group]])),
+          gsub(
+            pattern = " : .*",
+            replacement = "",
+            x = levels(cell_groups[[cell_group]])
+          )
+        ),
+        panel_fun = block_graphics,
+        which = ifelse(flip, "row", "column"),
+        show_name = FALSE
+      )
+      ha_cell_group <- do.call(
+        ComplexHeatmap::HeatmapAnnotation,
+        args = c(
+          anno,
+          which = ifelse(flip, "row", "column"),
+          show_annotation_name = TRUE,
+          annotation_name_side = ifelse(flip, "top", "left"),
+          border = cell_annotation_border
+        )
+      )
+      ha_top_list[[cell_group]] <- ha_cell_group
+    }
+
+    if (!is.null(split.by)) {
+      block_graphics <- thisplot::annotation_block_fill_graphics(
+        levels = levels(srt@meta.data[[split.by]]),
+        palette = cell_split_palette,
+        palcolor = unlist(cell_split_palcolor),
+        border = cell_annotation_border,
+        border_color = cell_annotation_border_color,
+        border_size = cell_annotation_border_size
+      )
+
+      anno <- list()
+      anno[[split.by]] <- ComplexHeatmap::anno_block(
+        align_to = split(
+          seq_along(levels(cell_groups[[cell_group]])),
+          gsub(
+            pattern = ".* : ",
+            replacement = "",
+            x = levels(cell_groups[[cell_group]])
+          )
+        ),
+        panel_fun = block_graphics,
+        which = ifelse(flip, "row", "column"),
+        show_name = i == 1
+      )
+      ha_split_by <- do.call(
+        ComplexHeatmap::HeatmapAnnotation,
+        args = c(
+          anno,
+          which = ifelse(flip, "row", "column"),
+          show_annotation_name = TRUE,
+          annotation_name_side = ifelse(flip, "top", "left"),
+          border = cell_annotation_border
+        )
+      )
+      if (is.null(ha_top_list[[cell_group]])) {
+        ha_top_list[[cell_group]] <- ha_split_by
+      } else {
+        ha_top_list[[cell_group]] <- c(ha_top_list[[cell_group]], ha_split_by)
+      }
+    }
+  }
+
+  for (i in seq_along(raw_group_by)) {
+    cell_group <- raw_group_by[i]
+    if (cell_group != "All.groups") {
+      lgd[[cell_group]] <- ComplexHeatmap::Legend(
+        title = cell_group,
+        labels = levels(srt@meta.data[[cell_group]]),
+        legend_gp = heatmap_discrete_legend_gp(
+          fill = palette_colors(
+            levels(srt@meta.data[[cell_group]]),
+            palette = raw_group_palette[i],
+            palcolor = group_palcolor[[i]]
+          ),
+          border = cell_annotation_border,
+          border_color = cell_annotation_border_color,
+          border_size = cell_annotation_border_size
+        ),
+        border = heatmap_legend_border(
+          cell_annotation_border,
+          cell_annotation_border_color
+        )
+      )
+    }
+  }
+
+  if (!is.null(split.by)) {
+    lgd[[split.by]] <- ComplexHeatmap::Legend(
+      title = split.by,
+      labels = levels(srt@meta.data[[split.by]]),
+      legend_gp = heatmap_discrete_legend_gp(
+        fill = palette_colors(
+          levels(srt@meta.data[[split.by]]),
+          palette = cell_split_palette,
+          palcolor = cell_split_palcolor
+        ),
+        border = cell_annotation_border,
+        border_color = cell_annotation_border_color,
+        border_size = cell_annotation_border_size
+      ),
+      border = heatmap_legend_border(
+        cell_annotation_border,
+        cell_annotation_border_color
+      )
+    )
+  }
+
+  if (!is.null(cell_annotation)) {
+    for (i in seq_along(cell_annotation)) {
+      cellan <- cell_annotation[i]
+      palette <- cell_annotation_palette[i]
+      palcolor <- cell_annotation_palcolor[[i]]
+      cell_anno <- cell_metadata[, cellan]
+      names(cell_anno) <- rownames(cell_metadata)
+      if (!is.numeric(cell_anno)) {
+        if (is.logical(cell_anno)) {
+          cell_anno <- factor(cell_anno, levels = c(TRUE, FALSE))
+        } else if (!is.factor(cell_anno)) {
+          cell_anno <- factor(cell_anno, levels = unique(cell_anno))
+        }
+        for (cell_group in group.by) {
+          subplots <- CellStatPlot(
+            srt,
+            flip = flip,
+            cells = names(cell_groups[[cell_group]]),
+            plot_type = "pie",
+            stat.by = cellan,
+            group.by = cell_group,
+            split.by = split.by,
+            palette = palette,
+            palcolor = palcolor,
+            title = NULL,
+            individual = TRUE,
+            combine = FALSE
+          )
+          graphics <- annotation_graphics(
+            subplots = subplots,
+            prefix = paste0(cellan, ":", cell_group)
+          )
+          x_nm <- sapply(
+            strsplit(levels(cell_groups[[cell_group]]), " : "),
+            function(x) {
+              if (length(x) == 2) {
+                paste0(c(cell_group, x[1], x[2]), collapse = ":")
+              } else {
+                paste0(c(cell_group, x[1], ""), collapse = ":")
+              }
+            }
+          )
+
+          ha_top <- tryCatch(
+            {
+              ha_cell <- list()
+              ha_cell[[cellan]] <- ComplexHeatmap::anno_customize(
+                x = x_nm,
+                graphics = graphics,
+                which = ifelse(flip, "row", "column"),
+                border = cell_annotation_border,
+                verbose = FALSE
+              )
+              build_heatmap_annotation(
+                annotations = ha_cell,
+                which = ifelse(flip, "row", "column"),
+                show_annotation_name = cell_group == group.by[1],
+                annotation_name_side = ifelse(flip, "top", "left"),
+                params = cell_annotation_params
+              )
+            },
+            error = function(e) {
+              log_message(
+                "Failed to build custom cell annotation '",
+                cellan,
+                "' for group '",
+                cell_group,
+                "'. Skip this annotation. Detail: ",
+                conditionMessage(e),
+                message_type = "warning",
+                verbose = verbose
+              )
+              NULL
+            }
+          )
+          if (!is.null(ha_top)) {
+            if (is.null(ha_top_list[[cell_group]])) {
+              ha_top_list[[cell_group]] <- ha_top
+            } else {
+              ha_top_list[[cell_group]] <- c(ha_top_list[[cell_group]], ha_top)
+            }
+          }
+        }
+        cell_levels <- levels(cell_anno)
+        cell_levels <- cell_levels[!is.na(cell_levels) & nzchar(cell_levels)]
+        if (length(cell_levels) > 0) {
+          lgd[[cellan]] <- ComplexHeatmap::Legend(
+            title = cellan,
+            labels = cell_levels,
+            legend_gp = heatmap_discrete_legend_gp(
+              fill = palette_colors(
+                cell_levels,
+                palette = palette,
+                palcolor = palcolor
+              ),
+              border = cell_annotation_border,
+              border_color = cell_annotation_border_color,
+              border_size = cell_annotation_border_size
+            ),
+            border = heatmap_legend_border(
+              cell_annotation_border,
+              cell_annotation_border_color
+            )
+          )
+        } else {
+          lgd[[cellan]] <- NULL
+        }
+      } else {
+        for (cell_group in group.by) {
+          subplots <- FeatureStatPlot(
+            srt,
+            assay = assay,
+            layer = "data",
+            flip = flip,
+            stat.by = cellan,
+            cells = names(cell_groups[[cell_group]]),
+            group.by = cell_group,
+            split.by = split.by,
+            palette = palette,
+            palcolor = palcolor,
+            fill.by = "group",
+            same.y.lims = TRUE,
+            individual = TRUE,
+            combine = FALSE
+          )
+          graphics <- annotation_graphics(
+            subplots = subplots,
+            prefix = paste0(cellan, ":", cell_group)
+          )
+          x_nm <- sapply(
+            strsplit(levels(cell_groups[[cell_group]]), " : "),
+            function(x) {
+              if (length(x) == 2) {
+                paste0(c(cellan, cell_group, x[1], x[2]), collapse = ":")
+              } else {
+                paste0(c(cellan, cell_group, x[1], ""), collapse = ":")
+              }
+            }
+          )
+          ha_top <- tryCatch(
+            {
+              ha_cell <- list()
+              ha_cell[[cellan]] <- ComplexHeatmap::anno_customize(
+                x = x_nm,
+                graphics = graphics,
+                which = ifelse(flip, "row", "column"),
+                border = cell_annotation_border,
+                verbose = FALSE
+              )
+              build_heatmap_annotation(
+                annotations = ha_cell,
+                which = ifelse(flip, "row", "column"),
+                show_annotation_name = cell_group == group.by[1],
+                annotation_name_side = ifelse(flip, "top", "left"),
+                params = cell_annotation_params
+              )
+            },
+            error = function(e) {
+              log_message(
+                "Failed to build custom cell annotation '",
+                cellan,
+                "' for group '",
+                cell_group,
+                "'. Skip this annotation. Detail: ",
+                conditionMessage(e),
+                message_type = "warning",
+                verbose = verbose
+              )
+              NULL
+            }
+          )
+          if (!is.null(ha_top)) {
+            if (is.null(ha_top_list[[cell_group]])) {
+              ha_top_list[[cell_group]] <- ha_top
+            } else {
+              ha_top_list[[cell_group]] <- c(ha_top_list[[cell_group]], ha_top)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (is.null(feature_split)) {
+    if (is.null(n_split) || isTRUE(nrow(mat_split) <= n_split)) {
+      row_split_raw <- row_split <- feature_split <- NULL
+    } else {
+      if (n_split == 1) {
+        row_split_raw <- row_split <- feature_split <- stats::setNames(
+          rep(1, nrow(mat_split)),
+          rownames(mat_split)
+        )
+      } else {
+        if (split_method == "mfuzz") {
+          check_r("e1071", verbose = FALSE)
+          mat_split_tmp <- mat_split
+          colnames(mat_split_tmp) <- make.unique(colnames(mat_split_tmp))
+          mat_split_tmp <- standardise(mat_split_tmp)
+          min_fuzzification <- mestimate(mat_split_tmp)
+          if (is.null(fuzzification)) {
+            fuzzification <- min_fuzzification + 0.1
+          } else {
+            if (fuzzification <= min_fuzzification) {
+              log_message(
+                "fuzzification value is samller than estimated:",
+                round(min_fuzzification, 2),
+                message_type = "warning",
+                verbose = verbose
+              )
+            }
+          }
+          cl <- e1071::cmeans(
+            mat_split_tmp,
+            centers = n_split,
+            method = "cmeans",
+            m = fuzzification
+          )
+          if (length(cl$cluster) == 0) {
+            log_message(
+              "Clustering with mfuzz failed (fuzzification=",
+              round(fuzzification, 2),
+              "). Please set a larger fuzzification parameter manually.",
+              message_type = "error"
+            )
+          }
+          row_split <- feature_split <- cl$cluster
+        }
+        if (split_method == "kmeans") {
+          km <- stats::kmeans(
+            mat_split,
+            centers = n_split,
+            iter.max = 1e4,
+            nstart = 20
+          )
+          row_split <- feature_split <- km$cluster
+        }
+        if (split_method == "hclust") {
+          hc <- stats::hclust(
+            stats::as.dist(proxyC::dist(mat_split))
+          )
+          row_split <- feature_split <- stats::cutree(hc, k = n_split)
+        }
+      }
+      groupmean <- stats::aggregate(
+        Matrix::t(mat_split),
+        by = list(unlist(lapply(cell_groups[feature_split_by], levels))),
+        mean
+      )
+      maxgroup <- groupmean[, 1][apply(
+        groupmean[, names(row_split)],
+        2,
+        which.max
+      )]
+      maxgroup <- factor(
+        maxgroup,
+        levels = levels(unlist(cell_groups[feature_split_by]))
+      )
+      df <- data.frame(row_split = row_split, order_by = maxgroup)
+      df_order <- stats::aggregate(
+        df[["order_by"]],
+        by = list(df[, "row_split"]),
+        FUN = function(x) names(sort(table(x), decreasing = TRUE))[1]
+      )
+      df_order[, "row_split"] <- df_order[, "Group.1"]
+      df_order[["order_by"]] <- as.numeric(
+        factor(
+          df_order[["x"]],
+          levels = levels(maxgroup)
+        )
+      )
+      df_order <- df_order[
+        order(df_order[["order_by"]], decreasing = decreasing), ,
+        drop = FALSE
+      ]
+      if (!is.null(split_order)) {
+        df_order <- df_order[split_order, , drop = FALSE]
+      }
+      split_levels <- c()
+      for (i in seq_len(nrow(df_order))) {
+        raw_nm <- df_order[i, "row_split"]
+        feature_split[feature_split == raw_nm] <- paste0("C", i)
+        level <- paste0("C", i, "(", sum(row_split == raw_nm), ")")
+        row_split[row_split == raw_nm] <- level
+        split_levels <- c(split_levels, level)
+      }
+      row_split_raw <- row_split <- factor(row_split, levels = split_levels)
+      feature_split <- factor(
+        feature_split,
+        levels = paste0("C", seq_len(nrow(df_order)))
+      )
+    }
+  } else {
+    row_split_raw <- row_split <- feature_split <- feature_split[row.names(
+      mat_split
+    )]
+  }
+
+  if (!is.null(feature_split)) {
+    feature_metadata[["feature_split"]] <- feature_split
+  } else {
+    feature_metadata[["feature_split"]] <- NA
+  }
+
+  ha_left <- NULL
+  if (!is.null(row_split)) {
+    if (isTRUE(cluster_row_slices)) {
+      if (isFALSE(cluster_rows)) {
+        dend <- ComplexHeatmap::cluster_within_group(
+          Matrix::t(mat_split),
+          row_split_raw
+        )
+        cluster_rows <- dend
+        row_split <- length(unique(row_split_raw))
+      }
+    }
+    block_graphics <- thisplot::annotation_block_fill_graphics(
+      levels = levels(row_split_raw),
+      palette = feature_split_palette,
+      palcolor = unlist(feature_split_palcolor),
+      border = feature_annotation_border,
+      border_color = feature_annotation_border_color,
+      border_size = feature_annotation_border_size
+    )
+    ha_clusters <- ComplexHeatmap::HeatmapAnnotation(
+      features_split = ComplexHeatmap::anno_block(
+        align_to = split(seq_along(row_split_raw), row_split_raw),
+        panel_fun = block_graphics,
+        width = grid::unit(0.1, "in"),
+        height = grid::unit(0.1, "in"),
+        show_name = FALSE,
+        which = ifelse(flip, "column", "row")
+      ),
+      which = ifelse(flip, "column", "row")
+    )
+    if (is.null(ha_left)) {
+      ha_left <- ha_clusters
+    } else {
+      ha_left <- c(ha_left, ha_clusters)
+    }
+    lgd[["Cluster"]] <- ComplexHeatmap::Legend(
+      title = "Cluster",
+      labels = intersect(levels(row_split_raw), row_split_raw),
+      legend_gp = heatmap_discrete_legend_gp(
+        fill = palette_colors(
+          intersect(levels(row_split_raw), row_split_raw),
+          type = "discrete",
+          palette = feature_split_palette,
+          palcolor = feature_split_palcolor,
+          matched = TRUE
+        ),
+        border = feature_annotation_border,
+        border_color = feature_annotation_border_color,
+        border_size = feature_annotation_border_size
+      ),
+      border = heatmap_legend_border(
+        feature_annotation_border,
+        feature_annotation_border_color
+      )
+    )
+  }
+
+  if (isTRUE(cluster_rows) && !is.null(cluster_features_by)) {
+    mat_cluster <- combined_mat[,
+      unlist(lapply(cluster_features_by, function(g) which(col_groups == g))),
+      drop = FALSE
+    ]
+    if (is.null(row_split)) {
+      dend <- stats::as.dendrogram(
+        stats::hclust(
+          stats::as.dist(proxyC::dist(mat_cluster))
+        )
+      )
+      dend_ordered <- stats::reorder(
+        dend,
+        wts = Matrix::colMeans(mat_cluster),
+        agglo.FUN = mean
+      )
+      cluster_rows <- dend_ordered
+    } else {
+      row_split <- length(unique(row_split_raw))
+      dend <- cluster_within_group2(Matrix::t(mat_cluster), row_split_raw)
+      cluster_rows <- dend
+    }
+  }
+
+  need_feature_order <- !is.null(features_label) || nlabel > 0
+  if (isTRUE(need_feature_order)) {
+    cell_group <- group.by[1]
+    ht_args <- list(
+      matrix = mat_list[[cell_group]],
+      col = colors,
+      row_split = row_split,
+      column_split = column_split_list[[cell_group]],
+      cluster_rows = cluster_rows,
+      cluster_columns = cluster_columns_list[[cell_group]],
+      cluster_row_slices = cluster_row_slices,
+      cluster_column_slices = cluster_column_slices,
+      use_raster = TRUE
+    )
+    ht_args <- c(ht_args, ht_params[setdiff(names(ht_params), names(ht_args))])
+    ht_list <- do.call(ComplexHeatmap::Heatmap, args = ht_args)
+    ht_order <- unlist(
+      suppressWarnings(
+        ComplexHeatmap::row_order(
+          ht_list
+        )
+      )
+    )
+    features_ordered <- rownames(mat_list[[1]])[ht_order]
+  } else {
+    features_ordered <- rownames(mat_list[[1]])
+  }
+  feature_metadata[["index"]] <- stats::setNames(
+    object = seq_along(features_ordered),
+    nm = features_ordered
+  )[rownames(feature_metadata)]
+
+  if (is.null(features_label)) {
+    if (nlabel > 0) {
+      if (length(features) > nlabel) {
+        index_from <- ceiling((length(features_ordered) / nlabel) / 2)
+        index_to <- length(features_ordered)
+        index <- unique(round(seq(
+          from = index_from,
+          to = index_to,
+          length.out = nlabel
+        )))
+      } else {
+        index <- seq_along(features_ordered)
+      }
+    } else {
+      index <- NULL
+    }
+  } else {
+    index <- which(features_ordered %in% features_label)
+    drop <- setdiff(features_label, features_ordered)
+    if (length(drop) > 0) {
+      log_message(
+        paste0(paste0(drop, collapse = ","), "was not found in the features"),
+        message_type = "warning"
+      )
+    }
+  }
+
+  if (length(index) > 0) {
+    mark_labels <- feature_metadata[
+      which(rownames(feature_metadata) %in% features_ordered[index]),
+      "features"
+    ]
+    if (!is.null(row_names_wrap)) {
+      mark_labels <- heatmap_wrap_row_labels(
+        mark_labels,
+        width = row_names_wrap
+      )
+    }
+    ha_mark <- ComplexHeatmap::HeatmapAnnotation(
+      gene = ComplexHeatmap::anno_mark(
+        at = which(rownames(feature_metadata) %in% features_ordered[index]),
+        labels = mark_labels,
+        side = ifelse(flip, "top", "left"),
+        labels_gp = grid::gpar(fontsize = label_size, col = label_color),
+        link_gp = grid::gpar(fontsize = label_size, col = label_color),
+        which = ifelse(flip, "column", "row")
+      ),
+      which = ifelse(flip, "column", "row"),
+      show_annotation_name = FALSE
+    )
+    if (is.null(ha_left)) {
+      ha_left <- ha_mark
+    } else {
+      ha_left <- c(ha_mark, ha_left)
+    }
+  }
+
+  ha_right <- NULL
+  if (!is.null(feature_annotation)) {
+    for (i in seq_along(feature_annotation)) {
+      featan <- feature_annotation[i]
+      palette <- feature_annotation_palette[i]
+      palcolor <- feature_annotation_palcolor[[i]]
+      feature <- build_heatmap_feature_annotation(
+        annotation_name = featan,
+        values = feature_metadata[, featan],
+        palette = palette,
+        palcolor = palcolor,
+        flip = flip,
+        border = feature_annotation_border,
+        border_color = feature_annotation_border_color,
+        border_size = feature_annotation_border_size,
+        discrete_legend_border = heatmap_legend_border(
+          feature_annotation_border,
+          feature_annotation_border_color
+        ),
+        params = feature_annotation_params
+      )
+      ha_right <- if (is.null(ha_right)) {
+        feature$annotation
+      } else {
+        c(ha_right, feature$annotation)
+      }
+      lgd[[featan]] <- feature$legend
+    }
+  }
+
+  enrichment <- heatmap_enrichment(
+    geneID = feature_metadata[["features"]],
+    geneID_groups = feature_metadata[["feature_split"]],
+    feature_split_palette = feature_split_palette,
+    feature_split_palcolor = feature_split_palcolor,
+    feature_annotation_border = feature_annotation_border,
+    feature_annotation_border_color = feature_annotation_border_color,
+    feature_annotation_border_size = feature_annotation_border_size,
+    ha_right = ha_right,
+    flip = flip,
+    anno_terms = anno_terms,
+    anno_keys = anno_keys,
+    anno_features = anno_features,
+    terms_width = terms_width,
+    terms_stat_width = terms_stat_width,
+    terms_fontsize = terms_fontsize,
+    terms_stat = terms_stat,
+    terms_stat_digits = terms_stat_digits,
+    terms_stat_label = terms_stat_label,
+    terms_stat_axis = terms_stat_axis,
+    terms_stat_background_palcolor = terms_stat_background_palcolor,
+    terms_stat_border = terms_stat_border,
+    terms_stat_border_palcolor = terms_stat_border_palcolor,
+    terms_stat_border_size = terms_stat_border_size,
+    terms_stat_label_palcolor = terms_stat_label_palcolor,
+    terms_group_background = terms_group_background,
+    terms_background_palcolor = terms_background_palcolor,
+    terms_background_alpha = terms_background_alpha,
+    terms_border = terms_border,
+    terms_border_palcolor = terms_border_palcolor,
+    terms_border_size = terms_border_size,
+    terms_text_palcolor = terms_text_palcolor,
+    terms_bar_palcolor = terms_bar_palcolor,
+    keys_width = keys_width,
+    keys_fontsize = keys_fontsize,
+    features_width = features_width,
+    features_fontsize = features_fontsize,
+    IDtype = IDtype,
+    species = species,
+    db_update = db_update,
+    db_version = db_version,
+    db_combine = db_combine,
+    convert_species = convert_species,
+    Ensembl_version = Ensembl_version,
+    mirror = mirror,
+    db = db,
+    TERM2GENE = TERM2GENE,
+    TERM2NAME = TERM2NAME,
+    minGSSize = minGSSize,
+    maxGSSize = maxGSSize,
+    GO_simplify = GO_simplify,
+    GO_simplify_cutoff = GO_simplify_cutoff,
+    simplify_method = simplify_method,
+    simplify_similarityCutoff = simplify_similarityCutoff,
+    pvalueCutoff = pvalueCutoff,
+    padjustCutoff = padjustCutoff,
+    topTerm = topTerm,
+    show_termid = show_termid,
+    topWord = topWord,
+    words_excluded = words_excluded
+  )
+  res <- enrichment$res
+  ha_right <- enrichment$ha_right
+  lgd <- c(lgd, enrichment$lgd)
+
+  ht_list <- NULL
+  vlnplots_list <- NULL
+  x_nm_list <- NULL
+  y_nm_list <- NULL
+  if (fill.by == "group") {
+    palette <- group_palette
+    palcolor <- group_palcolor
+  } else {
+    palette <- feature_annotation_palette
+    palcolor <- feature_annotation_palcolor
+  }
+
+  for (cell_group in group.by) {
+    if (cell_group == group.by[1]) {
+      left_annotation <- ha_left
+    } else {
+      left_annotation <- NULL
+    }
+    if (cell_group == group.by[length(group.by)]) {
+      right_annotation <- ha_right
+    } else {
+      right_annotation <- NULL
+    }
+    if (isTRUE(add_violin)) {
+      vlnplots <- FeatureStatPlot(
+        srt,
+        assay = assay,
+        layer = "data",
+        flip = flip,
+        stat.by = rownames(mat_list[[cell_group]]),
+        cells = names(cell_groups[[cell_group]]),
+        group.by = cell_group,
+        split.by = split.by,
+        palette = fill_palette,
+        palcolor = fill_palcolor,
+        fill.by = fill.by,
+        same.y.lims = TRUE,
+        individual = TRUE,
+        combine = FALSE
+      )
+      lgd[["ht"]] <- NULL
+
+      for (nm in names(vlnplots)) {
+        gtable <- as_grob(
+          vlnplots[[nm]] +
+            ggplot2::facet_null() +
+            ggplot2::theme_void() +
+            ggplot2::theme(legend.position = "none")
+        )
+        gtable$name <- paste0(cell_group, "-", nm)
+        vlnplots[[nm]] <- gtable
+      }
+      vlnplots_list[[paste0("heatmap_group:", cell_group)]] <- vlnplots
+      x_nm <- rownames(mat_list[[cell_group]])
+      x_nm_list[[paste0("heatmap_group:", cell_group)]] <- x_nm
+      y_nm <- sapply(
+        strsplit(levels(cell_groups[[cell_group]]), " : "),
+        function(x) {
+          if (length(x) == 2) {
+            paste0(c(cell_group, x[1], x[2]), collapse = ":")
+          } else {
+            paste0(c(cell_group, x[1], ""), collapse = ":")
+          }
+        }
+      )
+      y_nm_list[[paste0("heatmap_group:", cell_group)]] <- y_nm
+    }
+
+    funbody <- paste0(
+      if (isTRUE(add_dot) || isTRUE(add_violin)) {
+        "grid::grid.rect(x, y,
+          width = width, height = height,
+          gp = grid::gpar(col = 'white', lwd = 1, fill = 'white')
+        );"
+      },
+      if (isTRUE(add_bg)) {
+        paste0(
+          "
+        grid::grid.rect(x, y,
+          width = width, height = height,
+          gp = grid::gpar(col = fill, lwd = 1, fill = adjcolors(fill, ",
+          bg_alpha,
+          "))
+        );
+        "
+        )
+      },
+      if (isTRUE(add_reticle)) {
+        paste0(
+          "
+        ind_mat = ComplexHeatmap::restore_matrix(j, i, x, y);
+        ind_top = ind_mat[1,];
+        ind_left = ind_mat[,1];
+        for(col in seq_len(ncol(ind_mat))){
+          grid::grid.lines(
+            x = grid::unit(rep(x[ind_top[col]],each=2),'npc'),
+            y = grid::unit(c(0,1),'npc'),
+            gp = grid::gpar(col = '",
+          reticle_color,
+          "', lwd = 1.5));
+        };
+        for(row in seq_len(nrow(ind_mat))){
+          grid::grid.lines(
+            x = grid::unit(c(0,1),'npc'),
+            y = grid::unit(rep(y[ind_left[row]],each=2),'npc'),
+            gp = grid::gpar(col = '",
+          reticle_color,
+          "', lwd = 1.5));
+        };
+        "
+        )
+      },
+      if (isTRUE(add_dot)) {
+        paste0(
+          "perc <- ComplexHeatmap::pindex(mat_perc_list[['",
+          cell_group,
+          "']]",
+          ", i, j);
+        grid::grid.points(x, y,
+          pch = 21,
+          size = dot_size*perc,
+          gp = grid::gpar(col = 'black', lwd = 1, fill = fill)
+        );
+        "
+        )
+      },
+      if (isTRUE(add_violin)) {
+        if (isTRUE(flip)) {
+          paste0(
+            "
+        groblist <- extractgrobs(vlnplots = vlnplots_list[[paste0('heatmap_group:', '",
+            cell_group,
+            "')]],
+               x_nm =  x_nm_list[[paste0('heatmap_group:', '",
+            cell_group,
+            "')]],
+               y_nm= y_nm_list[[paste0('heatmap_group:', '",
+            cell_group,
+            "')]],
+               x = j,y = i);
+        grid_draw(groblist, x = x, y = y, width = width, height = height);
+        "
+          )
+        } else {
+          paste0(
+            "
+        groblist <- extractgrobs(vlnplots = vlnplots_list[[paste0('heatmap_group:', '",
+            cell_group,
+            "')]],
+               x_nm =  x_nm_list[[paste0('heatmap_group:', '",
+            cell_group,
+            "')]],
+               y_nm= y_nm_list[[paste0('heatmap_group:', '",
+            cell_group,
+            "')]],
+               x = i,y = j);
+        grid_draw(groblist, x = x, y = y, width = width, height = height);
+        "
+          )
+        }
+      }
+    )
+
+    funbody <- gsub(pattern = "\n", replacement = "", x = funbody)
+    eval(
+      parse(
+        text = paste(
+          "layer_fun <- function(j, i, x, y, width, height, fill) {",
+          funbody,
+          "}",
+          sep = ""
+        )
+      ),
+      envir = environment()
+    )
+    matrix_use <- if (flip) {
+      Matrix::t(mat_list[[cell_group]])
+    } else {
+      mat_list[[cell_group]]
+    }
+    ht_args <- list(
+      name = cell_group,
+      matrix = matrix_use,
+      col = colors,
+      layer_fun = methods::getFunction(
+        "layer_fun",
+        where = environment()
+      ),
+      row_title = row_title %||%
+        if (flip) {
+          ifelse(cell_group != "All.groups", cell_group, "")
+        } else {
+          character(0)
+        },
+      row_title_side = row_title_side,
+      column_title = column_title %||%
+        if (flip) {
+          character(0)
+        } else {
+          ifelse(cell_group != "All.groups", cell_group, "")
+        },
+      column_title_side = column_title_side,
+      row_title_rot = row_title_rot,
+      column_title_rot = column_title_rot,
+      row_split = if (flip) {
+        column_split_list[[cell_group]]
+      } else {
+        row_split
+      },
+      column_split = if (flip) {
+        row_split
+      } else {
+        column_split_list[[cell_group]]
+      },
+      cluster_rows = if (flip) {
+        cluster_columns_list[[cell_group]]
+      } else {
+        cluster_rows
+      },
+      cluster_columns = if (flip) {
+        cluster_rows
+      } else {
+        cluster_columns_list[[cell_group]]
+      },
+      cluster_row_slices = if (flip) {
+        cluster_column_slices
+      } else {
+        cluster_row_slices
+      },
+      cluster_column_slices = if (flip) {
+        cluster_row_slices
+      } else {
+        cluster_column_slices
+      },
+      show_row_names = show_row_names,
+      show_column_names = show_column_names,
+      row_names_side = row_names_side,
+      column_names_side = column_names_side,
+      row_names_rot = row_names_rot,
+      column_names_rot = column_names_rot,
+      top_annotation = if (flip) left_annotation else ha_top_list[[cell_group]],
+      left_annotation = if (flip) {
+        ha_top_list[[cell_group]]
+      } else {
+        left_annotation
+      },
+      bottom_annotation = if (flip) right_annotation else NULL,
+      right_annotation = if (flip) NULL else right_annotation,
+      show_heatmap_legend = FALSE,
+      border = heatmap_border,
+      border_gp = heatmap_border_gp(heatmap_border, heatmap_border_color, heatmap_border_size),
+      use_raster = use_raster,
+      raster_device = raster_device,
+      raster_by_magick = raster_by_magick,
+      width = if (is.numeric(width[cell_group])) {
+        grid::unit(width[cell_group], units = units)
+      } else {
+        NULL
+      },
+      height = if (is.numeric(height[cell_group])) {
+        grid::unit(height[cell_group], units = units)
+      } else {
+        NULL
+      }
+    )
+    if (!is.null(row_names_wrap)) {
+      row_labels <- heatmap_wrap_row_labels(
+        rownames(matrix_use),
+        width = row_names_wrap
+      )
+      ht_args[["row_labels"]] <- row_labels
+      if (!"row_names_max_width" %in% names(ht_params)) {
+        ht_args[["row_names_max_width"]] <- heatmap_row_labels_max_width(
+          row_labels,
+          gp = ht_params[["row_names_gp"]]
+        )
+      }
+    }
+
+    if (any(names(ht_params) %in% names(ht_args))) {
+      log_message(
+        "ht_params: ",
+        paste0(intersect(names(ht_params), names(ht_args)), collapse = ","),
+        " were duplicated and will not be used.",
+        message_type = "warning"
+      )
+    }
+    ht_args <- c(ht_args, ht_params[setdiff(names(ht_params), names(ht_args))])
+    if (isTRUE(flip)) {
+      if (is.null(ht_list)) {
+        ht_list <- do.call(ComplexHeatmap::Heatmap, args = ht_args)
+      } else {
+        ht_list <- ht_list %v% do.call(ComplexHeatmap::Heatmap, args = ht_args)
+      }
+    } else {
+      ht_list <- ht_list + do.call(ComplexHeatmap::Heatmap, args = ht_args)
+    }
+  }
+
+  if (
+    (!is.null(row_split) && length(index) > 0) ||
+      any(c(anno_terms, anno_keys, anno_features)) ||
+      !is.null(width) ||
+      !is.null(height)
+  ) {
+    fix <- TRUE
+    if (is.null(width) || is.null(height)) {
+      log_message(
+        "The size of the heatmap is fixed because certain elements are not scalable."
+      )
+      log_message(
+        "The width and height of the heatmap are determined by the size of the current viewport."
+      )
+      log_message(
+        "If you want to have more control over the size, you can manually set the parameters 'width' and 'height'."
+      )
+    }
+  } else {
+    fix <- FALSE
+  }
+
+  if (length(lgd) > 0) {
+    lgd <- lgd[!vapply(lgd, is.null, logical(1))]
+  }
+
+  rendersize <- heatmap_rendersize(
+    width = width,
+    height = height,
+    units = units,
+    ha_top_list = ha_top_list,
+    ha_left = ha_left,
+    ha_right = ha_right,
+    ht_list = ht_list,
+    legend_list = lgd,
+    flip = flip
+  )
+  width_sum <- rendersize[["width_sum"]]
+  height_sum <- rendersize[["height_sum"]]
+
+  if (isTRUE(fix)) {
+    fixsize_env <- new.env(parent = emptyenv())
+    invisible(grid::grid.grabExpr({
+      fixsize_env[["value"]] <- heatmap_fixsize(
+        width = width,
+        width_sum = width_sum,
+        height = height,
+        height_sum = height_sum,
+        units = units,
+        ht_list = ht_list,
+        legend_list = lgd
+      )
+    }))
+    fixsize <- fixsize_env[["value"]]
+    rm(fixsize_env)
+    ht_width <- fixsize[["ht_width"]]
+    ht_height <- fixsize[["ht_height"]]
+  } else {
+    ht_width <- grid::unit(width_sum, units = units)
+    ht_height <- grid::unit(height_sum, units = units)
+  }
+
+  g_tree <- grid::grid.grabExpr(
+    {
+      ComplexHeatmap::draw(
+        ht_list,
+        annotation_legend_list = lgd,
+        annotation_legend_side = legend.position
+      )
+      for (enrich in db) {
+        enrich_anno <- names(ha_right)[grep(
+          paste0("_split_", enrich),
+          names(ha_right)
+        )]
+        if (length(enrich_anno) > 0) {
+          for (enrich_anno_element in enrich_anno) {
+            enrich_obj <- strsplit(enrich_anno_element, "_split_")[[1]][1]
+            ComplexHeatmap::decorate_annotation(
+              enrich_anno_element,
+              slice = 1,
+              {
+                grid::grid.text(
+                  paste0(enrich, " (", enrich_obj, ")"),
+                  x = grid::unit(1, "npc"),
+                  y = grid::unit(1, "npc") + grid::unit(2.5, "mm"),
+                  just = c("left", "bottom")
+                )
+              }
+            )
+          }
+        }
+      }
+    },
+    width = ht_width,
+    height = ht_height,
+    wrap = TRUE,
+    wrap.grobs = TRUE
+  )
+  if (isTRUE(fix)) {
+    p <- panel_fix_overall(
+      g_tree,
+      width = as.numeric(ht_width),
+      height = as.numeric(ht_height),
+      units = units
+    )
+  } else {
+    p <- patchwork::wrap_plots(g_tree)
+  }
+
+  return(
+    list(
+      plot = p,
+      g_tree = g_tree,
+      matrix_list = mat_list,
+      feature_split = feature_split,
+      cell_metadata = cell_metadata,
+      feature_metadata = feature_metadata,
+      enrichment = res
+    )
+  )
+}
+
+group_heatmap_aggregate_matrix <- function(mat, groups, aggregate_fun = base::mean) {
+  groups <- groups[colnames(mat)]
+  group_levels <- levels(groups)
+  group_levels <- group_levels[group_levels %in% groups]
+  if (identical(aggregate_fun, base::mean)) {
+    out <- vapply(
+      group_levels,
+      function(group) rowMeans(mat[, groups == group, drop = FALSE]),
+      numeric(nrow(mat))
+    )
+    return(group_heatmap_legacy_aggregate_layout(
+      out = out,
+      group_levels = group_levels,
+      all_levels = levels(groups)
+    ))
+  }
+  out <- Matrix::t(stats::aggregate(
+    Matrix::t(mat),
+    by = list(groups),
+    FUN = aggregate_fun
+  ))
+  colnames(out) <- out[1, , drop = FALSE]
+  out <- out[-1, , drop = FALSE]
+  class(out) <- "numeric"
+  out
+}
+
+group_heatmap_legacy_aggregate_layout <- function(out, group_levels, all_levels) {
+  aggregate_out <- data.frame(
+    Group.1 = factor(group_levels, levels = all_levels),
+    Matrix::t(out),
+    check.names = FALSE
+  )
+  aggregate_out <- Matrix::t(aggregate_out)
+  colnames(aggregate_out) <- aggregate_out[1, , drop = FALSE]
+  aggregate_out <- aggregate_out[-1, , drop = FALSE]
+  class(aggregate_out) <- "numeric"
+  aggregate_out
+}
+
+group_heatmap_expression_fraction <- function(mat, groups, exp_cutoff = 0) {
+  groups <- groups[colnames(mat)]
+  group_levels <- levels(groups)
+  group_levels <- group_levels[group_levels %in% groups]
+  out <- vapply(
+    group_levels,
+    function(group) rowMeans(mat[, groups == group, drop = FALSE] > exp_cutoff),
+    numeric(nrow(mat))
+  )
+  group_heatmap_legacy_aggregate_layout(
+    out = out,
+    group_levels = group_levels,
+    all_levels = levels(groups)
+  )
+}

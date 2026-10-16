@@ -1,0 +1,416 @@
+#' @title Annotate single cells with a C++ SciBet-compatible classifier
+#'
+#' @description
+#' Run a C++ implementation of the core SciBet classifier using a
+#' labeled reference `Seurat` object.
+#'
+#' @md
+#' @inheritParams RunSingleR
+#' @inheritParams thisutils::log_message
+#' @param features Candidate features used by SciBet. If `NULL`, common genes
+#' between query and reference are used.
+#' @param nfeatures Number of entropy-test features selected from `features`.
+#' @param additional_features_per_class Additional high-expression features
+#' selected per reference class.
+#' @param query_layer,ref_layer Assay layers used for query and reference.
+#' @param input_transform How to transform extracted values before SciBet's
+#' internal `log1p` step. `"auto"` applies `expm1` to `"data"` layers and no
+#' transform otherwise.
+#' @param prefix Prefix for metadata columns.
+#' @param store_model Whether to store the SciBet core and probabilities in
+#' `srt_query@tools`.
+#' @param store_probabilities Whether to store the full cell-by-class
+#' probability matrix. The default keeps annotations and maximum probability
+#' scores while avoiding a large result object on full-scale data.
+#' @param return_object Whether to return the annotated `Seurat` query object.
+#' If `FALSE`, return a lightweight list with annotations, scores,
+#' probabilities, and model components without copying `srt_query`.
+#'
+#' @return A `Seurat` object with SciBet annotations in metadata and results in
+#' `srt_query@tools[["SciBet"]]`.
+#' @export
+#'
+#' @examples
+#' data(panc8_sub)
+#' keep <- panc8_sub$celltype %in% c("ductal", "alpha", "beta")
+#' panc8_sub <- Seurat::NormalizeData(panc8_sub[, keep], verbose = FALSE)
+#' reference <- panc8_sub[, panc8_sub$tech != "fluidigmc1"]
+#' query <- panc8_sub[, panc8_sub$tech == "fluidigmc1"]
+#' query <- RunSciBet(
+#'   srt_query = query, srt_ref = reference,
+#'   ref_group = "celltype", nfeatures = 200, verbose = FALSE
+#' )
+#' query <- RunStandardWorkflow(query, verbose = FALSE, linear_reduction_dims = 10)
+#' CellDimPlot(
+#'   query,
+#'   group.by = "scibet_annotation",
+#'   label = TRUE, legend.position = "bottom"
+#' )
+RunSciBet <- function(
+  srt_query,
+  srt_ref,
+  ref_group,
+  query_group = NULL,
+  query_assay = NULL,
+  ref_assay = NULL,
+  query_layer = "counts",
+  ref_layer = "counts",
+  features = NULL,
+  nfeatures = 1000,
+  additional_features_per_class = 0,
+  input_transform = c("auto", "none", "expm1"),
+  prefix = "scibet",
+  store_model = TRUE,
+  store_probabilities = FALSE,
+  return_object = TRUE,
+  verbose = TRUE
+) {
+  if (!inherits(srt_query, "Seurat")) {
+    log_message(
+      "{.arg srt_query} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  if (!inherits(srt_ref, "Seurat")) {
+    log_message(
+      "{.arg srt_ref} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+  input_transform <- match.arg(input_transform)
+  query_assay <- query_assay %||% SeuratObject::DefaultAssay(srt_query)
+  ref_assay <- ref_assay %||% SeuratObject::DefaultAssay(srt_ref)
+
+  if (is.null(ref_group)) {
+    log_message(
+      "{.arg ref_group} must be provided",
+      message_type = "error"
+    )
+  }
+  if (length(ref_group) == 1L && ref_group %in% colnames(srt_ref@meta.data)) {
+    ref_labels <- srt_ref[[ref_group, drop = TRUE]]
+  } else if (length(ref_group) == ncol(srt_ref)) {
+    ref_labels <- ref_group
+  } else {
+    log_message(
+      "{.arg ref_group} must be one metadata column or one value per reference cell",
+      message_type = "error"
+    )
+  }
+  ref_labels <- as.character(ref_labels)
+  keep_ref <- !is.na(ref_labels)
+  if (!all(keep_ref)) {
+    log_message(
+      "Drop {.val {sum(!keep_ref)}} reference cells with missing {.arg ref_group}",
+      verbose = verbose
+    )
+    srt_ref <- srt_ref[, keep_ref]
+    ref_labels <- ref_labels[keep_ref]
+  }
+  ref_labels <- factor(ref_labels)
+  if (nlevels(ref_labels) < 2L) {
+    log_message(
+      "{.arg ref_group} must contain at least two non-missing classes",
+      message_type = "error"
+    )
+  }
+
+  if (!is.null(query_group)) {
+    if (
+      length(query_group) == 1L &&
+        query_group %in% colnames(srt_query@meta.data)
+    ) {
+      query_labels <- srt_query[[query_group, drop = TRUE]]
+    } else if (length(query_group) == ncol(srt_query)) {
+      query_labels <- query_group
+    } else {
+      log_message(
+        "{.arg query_group} must be one metadata column or one value per query cell",
+        message_type = "error"
+      )
+    }
+    query_labels <- as.character(query_labels)
+  } else {
+    query_labels <- NULL
+  }
+
+  query_features <- rownames(srt_query[[query_assay]])
+  ref_features <- rownames(srt_ref[[ref_assay]])
+  features <- features %||% query_features
+  common_features <- unique(intersect(
+    features,
+    intersect(query_features, ref_features)
+  ))
+  if (length(common_features) == 0L) {
+    log_message(
+      "No common features are available for {.fn RunSciBet}",
+      message_type = "error"
+    )
+  }
+  log_message(
+    "Run C++ SciBet-compatible classification with {.val {length(common_features)}} candidate features and {.val {nlevels(ref_labels)}} reference classes",
+    verbose = verbose
+  )
+
+  ref_expr <- scibet_expr_matrix(
+    srt = srt_ref,
+    assay = ref_assay,
+    layer = ref_layer,
+    features = common_features,
+    input_transform = input_transform
+  )
+  if (is.null(query_labels)) {
+    query_expr <- scibet_expr_matrix(
+      srt = srt_query,
+      assay = query_assay,
+      layer = query_layer,
+      features = common_features,
+      input_transform = input_transform
+    )
+    query_expr_run <- query_expr
+    query_run_index <- colnames(query_expr)
+  } else {
+    keep_query <- !is.na(query_labels)
+    if (!all(keep_query)) {
+      log_message(
+        "Cells with missing {.arg query_group} will receive {.val NA} SciBet annotation",
+        message_type = "warning",
+        verbose = verbose
+      )
+    }
+    group <- factor(query_labels[keep_query])
+    if (nlevels(group) == 0L) {
+      log_message(
+        "{.arg query_group} does not contain any non-missing groups",
+        message_type = "error"
+      )
+    }
+    query_expr <- GetAssayData5(
+      object = srt_query,
+      assay = query_assay,
+      layer = query_layer
+    )[common_features, keep_query, drop = FALSE]
+    query_transform <- input_transform
+    if (query_transform == "auto") {
+      query_transform <- if (identical(query_layer, "data")) "expm1" else "none"
+    }
+    if (query_transform == "expm1") {
+      if (inherits(query_expr, "sparseMatrix")) {
+        query_expr@x <- expm1(query_expr@x)
+      } else {
+        query_expr <- expm1(query_expr)
+      }
+    }
+    if (inherits(query_expr, "sparseMatrix")) {
+      query_expr@x[!is.finite(query_expr@x) | query_expr@x < 0] <- 0
+    } else {
+      query_expr[!is.finite(query_expr) | query_expr < 0] <- 0
+    }
+    design <- Matrix::sparse.model.matrix(~ 0 + group)
+    colnames(design) <- levels(group)
+    query_expr_run <- query_expr %*% design
+    query_expr_run <- sweep(query_expr_run, 2, as.numeric(table(group)), "/")
+    if (inherits(query_expr_run, "Matrix")) {
+      query_expr_run <- methods::as(query_expr_run, "CsparseMatrix")
+      if (!inherits(query_expr_run, "dgCMatrix")) {
+        query_expr_run <- methods::as(query_expr_run, "dgCMatrix")
+      }
+      query_expr_run <- Matrix::drop0(query_expr_run)
+    } else {
+      query_expr_run <- as.matrix(query_expr_run)
+      storage.mode(query_expr_run) <- "double"
+    }
+    query_run_index <- colnames(query_expr_run)
+  }
+
+  if (!isTRUE(return_object)) {
+    rm(srt_query, srt_ref)
+    if (exists("query_expr", inherits = FALSE)) {
+      rm(query_expr)
+    }
+    gc(verbose = FALSE)
+  }
+
+  result <- if (
+    inherits(ref_expr, "dgCMatrix") &&
+      inherits(query_expr_run, "dgCMatrix")
+  ) {
+    scibet_fit_predict_sparse(
+      ref = ref_expr,
+      query = query_expr_run,
+      labels = as.integer(ref_labels),
+      n_labels = nlevels(ref_labels),
+      n_top = as.integer(nfeatures),
+      additional_per_label = as.integer(additional_features_per_class),
+      return_probabilities = isTRUE(store_probabilities)
+    )
+  } else {
+    scibet_fit_predict(
+      ref = as.matrix(ref_expr),
+      query = as.matrix(query_expr_run),
+      labels = as.integer(ref_labels),
+      n_labels = nlevels(ref_labels),
+      n_top = as.integer(nfeatures),
+      additional_per_label = as.integer(additional_features_per_class),
+      return_probabilities = isTRUE(store_probabilities)
+    )
+  }
+
+  classes <- levels(ref_labels)
+  prob_run <- result[["probabilities"]]
+  if (!is.null(prob_run)) {
+    colnames(prob_run) <- classes
+    rownames(prob_run) <- query_run_index
+  }
+  predicted_run <- classes[result[["predicted_index"]]]
+  names(predicted_run) <- query_run_index
+  score_run <- result[["max_probability"]]
+  if (is.null(score_run)) {
+    score_run <- apply(prob_run, 1, max)
+  }
+  names(score_run) <- query_run_index
+
+  parameters <- list(
+    query_assay = query_assay,
+    ref_assay = ref_assay,
+    query_layer = query_layer,
+    ref_layer = ref_layer,
+    query_group = query_group,
+    ref_group = ref_group,
+    nfeatures = nfeatures,
+    additional_features_per_class = additional_features_per_class,
+    input_transform = input_transform,
+    store_probabilities = isTRUE(store_probabilities),
+    prefix = prefix
+  )
+
+  if (!isTRUE(return_object) && !is.null(query_labels)) {
+    payload <- list(
+      annotation = predicted_run,
+      score = score_run,
+      classes = classes,
+      parameters = parameters
+    )
+    if (isTRUE(store_probabilities)) {
+      payload$probabilities <- prob_run
+    }
+    if (isTRUE(store_model)) {
+      core <- result[["core"]]
+      feature_index <- result[["feature_index"]]
+      selected_features <- common_features[feature_index]
+      rownames(core) <- selected_features
+      colnames(core) <- classes
+      payload$model <- core
+      payload$features <- selected_features
+      payload$candidate_features <- common_features
+    }
+    return(payload)
+  }
+
+  if (!is.null(query_labels)) {
+    predicted <- rep(NA_character_, ncol(srt_query))
+    names(predicted) <- colnames(srt_query)
+    score <- rep(NA_real_, ncol(srt_query))
+    names(score) <- colnames(srt_query)
+    matched <- as.character(query_labels) %in% names(predicted_run)
+    predicted[matched] <- predicted_run[as.character(query_labels[matched])]
+    score[matched] <- score_run[as.character(query_labels[matched])]
+    prob_store <- prob_run
+  } else {
+    predicted <- predicted_run[colnames(srt_query)]
+    score <- score_run[colnames(srt_query)]
+    prob_store <- if (is.null(prob_run)) {
+      NULL
+    } else {
+      prob_run[colnames(srt_query), , drop = FALSE]
+    }
+  }
+
+  annotation_col <- paste0(prefix, "_annotation")
+  score_col <- paste0(prefix, "_score")
+
+  payload <- list(
+    annotation = predicted,
+    score = score,
+    classes = classes,
+    parameters = parameters
+  )
+  if (isTRUE(store_probabilities)) {
+    payload$probabilities <- prob_store
+  }
+  if (isTRUE(store_model)) {
+    core <- result[["core"]]
+    feature_index <- result[["feature_index"]]
+    selected_features <- common_features[feature_index]
+    rownames(core) <- selected_features
+    colnames(core) <- classes
+    payload$model <- core
+    payload$features <- selected_features
+    payload$candidate_features <- common_features
+  }
+
+  if (!isTRUE(return_object)) {
+    return(payload)
+  }
+
+  srt_query[[annotation_col]] <- unname(predicted)
+  srt_query[[score_col]] <- unname(score)
+
+  if (isTRUE(store_model)) {
+    srt_query@tools[["SciBet"]] <- payload[setdiff(names(payload), c("annotation", "score"))]
+  }
+
+  log_message(
+    "{.pkg SciBet} annotations stored in metadata column {.val {annotation_col}}",
+    verbose = verbose
+  )
+  srt_query
+}
+
+scibet_expr_matrix <- function(
+  srt,
+  assay,
+  layer,
+  features,
+  input_transform = c("auto", "none", "expm1")
+) {
+  input_transform <- match.arg(input_transform)
+  assay_obj <- srt[[assay]]
+  x <- if (inherits(assay_obj, "Assay5")) {
+    SeuratObject::LayerData(
+      object = assay_obj,
+      layer = layer,
+      features = features,
+      fast = FALSE
+    )
+  } else {
+    GetAssayData5(
+      object = srt,
+      assay = assay,
+      layer = layer
+    )[features, , drop = FALSE]
+  }
+
+  transform_use <- input_transform
+  if (transform_use == "auto") {
+    transform_use <- if (identical(layer, "data")) "expm1" else "none"
+  }
+  if (inherits(x, "sparseMatrix")) {
+    if (!inherits(x, "dgCMatrix")) {
+      x <- methods::as(x, "dgCMatrix")
+    }
+    if (transform_use == "expm1") {
+      x@x <- expm1(x@x)
+    }
+    x@x[!is.finite(x@x) | x@x < 0] <- 0
+    return(Matrix::drop0(x))
+  }
+
+  x <- as.matrix(x)
+  storage.mode(x) <- "double"
+  if (transform_use == "expm1") {
+    x <- expm1(x)
+  }
+  x[!is.finite(x) | x < 0] <- 0
+  x
+}

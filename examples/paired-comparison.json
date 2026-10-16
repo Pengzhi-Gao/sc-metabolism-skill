@@ -1,0 +1,11 @@
+{
+  "sample": "donor_id",
+  "condition": "condition",
+  "case": "Treatment",
+  "control": "Control",
+  "design": "paired",
+  "strata": [],
+  "min_cells": 20,
+  "min_samples": 3,
+  "top_n": 12
+}

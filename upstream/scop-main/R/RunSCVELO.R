@@ -1,0 +1,958 @@
+#' @title Run scVelo workflow
+#'
+#' @description
+#' scVelo is a scalable toolkit for RNA velocity analysis in single cells.
+#' Runs an enhanced scVelo workflow on a Seurat object with improved error handling,
+#' version compatibility, and modular design.
+#'
+#' @md
+#' @inheritParams thisutils::log_message
+#' @inheritParams RunCellRank
+#' @inheritParams scop-params
+#' @param backend Backend used to compute RNA velocity. `"python"` keeps the
+#' original scVelo workflow. `"cpp"` uses the package C++ implementation for a
+#' stochastic velocity embedding that is compatible with [VelocityPlot].
+#' The C++ backend never switches to Python implicitly.
+#' @param max_dense_gib Maximum estimated GiB allowed for the dense expression
+#' working matrices used by the C++ path.
+#' @param filter_genes Whether to filter genes based on minimum counts.
+#' @param min_counts Minimum counts for gene filtering.
+#' @param min_counts_u Minimum unspliced counts for gene filtering.
+#' @param normalize_per_cell Whether to normalize counts per cell.
+#' @param log_transform Whether to apply log transformation to AnnData `X` in
+#' the Python backend. The C++ velocity calculation uses spliced/unspliced
+#' layers, matching scVelo, so this does not alter its velocity matrices.
+#' @param use_raw Whether to use raw data for dynamical modeling.
+#' @param diff_kinetics Whether to use differential kinetics.
+#' @param denoise_topn Number of genes with highest likelihood selected to infer velocity directions.
+#' @param kinetics_topn Number of genes with highest likelihood selected to infer velocity directions.
+#' @param compute_velocity_confidence Whether to compute velocity confidence metrics.
+#' @param compute_velocity_graph Whether to compute and store the velocity graph
+#' for downstream terminal-state or pseudotime calculations. If `NULL`, compute
+#' and store the graph only when terminal states or pseudotime are requested.
+#' The velocity embedding itself is always graph-projected, matching
+#' `scv.tl.velocity_embedding`.
+#' @param compute_terminal_states Whether to compute terminal states (root and end
+#' points). The C++ backend needs the optional `RSpectra` package for this step
+#' and for `compute_pseudotime`.
+#' @param compute_pseudotime Whether to compute velocity pseudotime.
+#' @param compute_paga Whether to compute PAGA (Partition-based graph abstraction).
+#' @param top_n The number of top features to plot.
+#' @param cores Number of CPU cores. `NULL` (the default) uses the process
+#' OpenMP team for the C++ kernels and one Python worker.
+#'
+#' @seealso
+#' [VelocityPlot], [CellDimPlot], [RunPAGA]
+#'
+#' @export
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunSCVELO(
+#'   pancreas_sub,
+#'   assay_x = "RNA",
+#'   group.by = "SubCellType",
+#'   linear_reduction = "PCA",
+#'   nonlinear_reduction = "UMAP",
+#'   backend = "cpp",
+#'   show_plot = FALSE
+#' )
+#'
+#' FeatureDimPlot(
+#'   pancreas_sub,
+#'   c(
+#'     "stochastic_length",
+#'     "stochastic_confidence"
+#'   )
+#' )
+#'
+#' VelocityPlot(
+#'   pancreas_sub,
+#'   reduction = "UMAP",
+#'   plot_type = "stream"
+#' )
+#'
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "SubCellType",
+#'   reduction = "UMAP",
+#'   pt.size = NA,
+#'   velocity = "stochastic"
+#' )
+RunSCVELO <- function(
+  object = NULL,
+  adata = NULL,
+  assay_x = "RNA",
+  layer_x = "counts",
+  assay_y = c("spliced", "unspliced"),
+  layer_y = "counts",
+  group.by = NULL,
+  linear_reduction = NULL,
+  nonlinear_reduction = NULL,
+  basis = NULL,
+  mode = "stochastic",
+  fitting_by = "stochastic",
+  magic_impute = FALSE,
+  knn = 5,
+  t = 2,
+  min_shared_counts = 30,
+  n_pcs = 30,
+  n_neighbors = 30,
+  filter_genes = TRUE,
+  min_counts = 3,
+  min_counts_u = 3,
+  normalize_per_cell = TRUE,
+  log_transform = TRUE,
+  use_raw = FALSE,
+  diff_kinetics = FALSE,
+  stream_smooth = NULL,
+  stream_density = 2,
+  arrow_length = 5,
+  arrow_size = 5,
+  arrow_density = 0.5,
+  denoise = FALSE,
+  denoise_topn = 3,
+  kinetics = FALSE,
+  kinetics_topn = 100,
+  calculate_velocity_genes = FALSE,
+  compute_velocity_confidence = TRUE,
+  compute_velocity_graph = NULL,
+  compute_terminal_states = FALSE,
+  compute_pseudotime = FALSE,
+  compute_paga = FALSE,
+  top_n = 6,
+  cores = NULL,
+  palette = "Chinese",
+  palcolor = NULL,
+  legend.position = "on data",
+  show_plot = TRUE,
+  save_plot = FALSE,
+  plot_format = c("pdf", "png", "svg"),
+  plot_dpi = 300,
+  plot_prefix = "scvelo",
+  dirpath = "./scvelo",
+  backend = c("python", "cpp"),
+  max_dense_gib = 8,
+  return_seurat = !is.null(srt),
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  backend <- match.arg(backend)
+  plot_format <- match.arg(plot_format)
+
+  if (identical(backend, "cpp")) {
+    srt <- run_scanpy_cpp(
+      srt = srt,
+      assay_x = assay_x,
+      assay_y = assay_y,
+      layer_y = layer_y,
+      group.by = group.by,
+      linear_reduction = linear_reduction,
+      nonlinear_reduction = nonlinear_reduction,
+      n_pcs = n_pcs,
+      n_neighbors = n_neighbors,
+      mode = mode,
+      filter_genes = filter_genes,
+      min_counts = min_counts,
+      min_counts_u = min_counts_u,
+      min_shared_counts = min_shared_counts,
+      normalize_per_cell = normalize_per_cell,
+      log_transform = log_transform,
+      compute_terminal_states = compute_terminal_states,
+      compute_pseudotime = compute_pseudotime,
+      compute_velocity_confidence = compute_velocity_confidence,
+      compute_velocity_graph = compute_velocity_graph,
+      fitting_by = fitting_by,
+      use_raw = use_raw,
+      diff_kinetics = diff_kinetics,
+      denoise = denoise,
+      denoise_topn = denoise_topn,
+      kinetics = kinetics,
+      kinetics_topn = kinetics_topn,
+      calculate_velocity_genes = calculate_velocity_genes,
+      magic_impute = magic_impute,
+      magic_knn = knn,
+      magic_t = t,
+      max_dense_gib = max_dense_gib,
+      cores = cores,
+      return_seurat = return_seurat,
+      verbose = verbose
+    )
+    if (isTRUE(compute_paga)) {
+      srt <- run_paga_cpp(
+        srt = srt, group.by = group.by,
+        linear_reduction = linear_reduction,
+        nonlinear_reduction = nonlinear_reduction,
+        n_pcs = n_pcs, n_neighbors = n_neighbors,
+        paga_layout = "fr", threshold = 0.1, cores = cores,
+        use_rna_velocity = TRUE, vkey = unlist(mode)[[1L]],
+        verbose = verbose
+      )
+    }
+    if (isTRUE(show_plot) || isTRUE(save_plot)) {
+      plot <- VelocityPlot(
+        srt,
+        reduction = nonlinear_reduction, velocity = unlist(mode)[[1L]],
+        plot_type = "stream", group.by = group.by,
+        density = stream_density, smooth = stream_smooth %||% 0.5,
+        streamline_width = c(0, arrow_size / 5)
+      )
+      if (isTRUE(show_plot)) print(plot)
+      if (isTRUE(save_plot)) {
+        dir.create(dirpath, recursive = TRUE, showWarnings = FALSE)
+        ggplot2::ggsave(file.path(dirpath, paste0(plot_prefix, ".", plot_format)), plot, dpi = plot_dpi)
+      }
+    }
+    return(srt)
+  }
+
+  PrepareEnv(
+    modules = c(
+      "scvelo",
+      if (isTRUE(magic_impute)) "magic"
+    ),
+    verbose = verbose
+  )
+
+  if (all(is.null(srt), is.null(adata))) {
+    log_message(
+      "One of {.arg srt} or {.arg adata} must be provided",
+      message_type = "error"
+    )
+  }
+  if (is.null(group.by)) {
+    log_message(
+      "{.arg group.by} must be provided",
+      message_type = "error"
+    )
+  }
+
+  if (!is.null(srt)) {
+    if (is.null(linear_reduction)) {
+      linear_reduction <- DefaultReduction(srt)
+    } else {
+      linear_reduction <- DefaultReduction(srt, pattern = linear_reduction)
+    }
+    if (!linear_reduction %in% names(srt@reductions)) {
+      log_message(
+        "{.val {linear_reduction}} is not in the srt reduction names",
+        message_type = "error"
+      )
+    }
+
+    if (is.null(nonlinear_reduction)) {
+      nonlinear_reduction <- DefaultReduction(srt)
+    } else {
+      nonlinear_reduction <- DefaultReduction(
+        srt,
+        pattern = nonlinear_reduction
+      )
+    }
+    if (!nonlinear_reduction %in% names(srt@reductions)) {
+      log_message(
+        "{.val {nonlinear_reduction}} is not in the srt reduction names",
+        message_type = "error"
+      )
+    }
+  }
+
+  if (is.character(mode) && length(mode) == 1) {
+    mode <- list(mode)
+  }
+
+  args <- mget(names(formals()))
+  args <- lapply(args, function(x) {
+    if (is.numeric(x)) {
+      y <- ifelse(grepl("\\.", as.character(x)), as.double(x), as.integer(x))
+    } else {
+      y <- x
+    }
+    return(y)
+  })
+
+  call.envir <- parent.frame(1)
+  args <- lapply(args, function(arg) {
+    if (is.symbol(arg)) {
+      eval(arg, envir = call.envir)
+    } else if (is.call(arg)) {
+      eval(arg, envir = call.envir)
+    } else {
+      arg
+    }
+  })
+
+  args[["n_jobs"]] <- cores %||% 1L
+
+  args[["legend_loc"]] <- legend.position
+
+  args[["dpi"]] <- plot_dpi
+  args[["fileprefix"]] <- plot_prefix
+
+  params <- c(
+    "srt",
+    "object",
+    "assay_x",
+    "layer_x",
+    "assay_y",
+    "layer_y",
+    "return_seurat",
+    "palette",
+    "palcolor",
+    "cores",
+    "legend.position",
+    "plot_dpi",
+    "plot_prefix",
+    "backend",
+    "compute_velocity_graph",
+    "max_dense_gib"
+  )
+  args <- args[!names(args) %in% params]
+
+  if (!is.null(srt)) {
+    args[["adata"]] <- srt_to_adata(
+      object = srt,
+      assay_x = assay_x,
+      layer_x = layer_x,
+      assay_y = assay_y,
+      layer_y = layer_y,
+      prepare_env = FALSE,
+      verbose = verbose
+    )
+  }
+
+  if ("group.by" %in% names(args)) {
+    args[["group_by"]] <- args[["group.by"]]
+    args[["group.by"]] <- NULL
+  }
+  groups <- py_to_r2(args[["adata"]]$obs)[[group.by]]
+  args[["palette"]] <- palette_colors(
+    levels(groups) %||% unique(groups),
+    palette = palette,
+    palcolor = palcolor
+  )
+
+  functions <- scop_python_import("functions", convert = TRUE)
+
+  adata <- do.call(functions$SCVELO, args)
+
+  if (isTRUE(return_seurat)) {
+    srt_out <- adata_to_srt(adata)
+    if (is.null(srt)) {
+      srt_final <- srt_out
+    } else {
+      srt_out1 <- srt_append(srt_raw = srt, srt_append = srt_out)
+      srt_final <- srt_append(
+        srt_raw = srt_out1,
+        srt_append = srt_out,
+        pattern = paste0(
+          "(velocity)|(distances)|(connectivities)|(Ms)|(Mu)|(",
+          paste(mode, collapse = ")|("),
+          ")|(paga)"
+        ),
+        overwrite = TRUE,
+        verbose = FALSE
+      )
+    }
+    reduction_names <- names(srt_final@reductions)
+    meta_names <- colnames(srt_final@meta.data)
+    misc_names <- names(srt_final@misc)
+    scvelo_tools <- list(
+      backend = "python",
+      group.by = group.by,
+      parameters = list(
+        linear_reduction = linear_reduction,
+        nonlinear_reduction = nonlinear_reduction,
+        n_pcs = n_pcs,
+        n_neighbors = n_neighbors
+      ),
+      mode = mode
+    )
+    for (m in mode) {
+      velocity_reduction <- reduction_names[
+        grepl(paste0("^", m, "_"), reduction_names, ignore.case = TRUE) |
+          grepl("^velocity_", reduction_names, ignore.case = TRUE)
+      ]
+      conf_key <- intersect(
+        c(paste0(m, "_confidence"), "velocity_confidence"), meta_names
+      )
+      len_key <- intersect(
+        c(paste0(m, "_length"), "velocity_length"), meta_names
+      )
+      pt_key <- intersect(
+        c(paste0(m, "_pseudotime"), "velocity_pseudotime"), meta_names
+      )
+      graph_key <- intersect(
+        c(paste0(m, "_graph"), "velocity_graph"), misc_names
+      )
+      scvelo_tools[[m]] <- list(
+        velocity_reduction = if (length(velocity_reduction) > 0L) {
+          velocity_reduction[[1L]]
+        } else {
+          NULL
+        },
+        confidence_key = if (length(conf_key) > 0L) conf_key[[1L]] else NULL,
+        length_key = if (length(len_key) > 0L) len_key[[1L]] else NULL,
+        pseudotime_key = if (length(pt_key) > 0L) pt_key[[1L]] else NULL,
+        velocity_graph = if (length(graph_key) > 0L) {
+          srt_final@misc[[graph_key[[1L]]]]
+        } else {
+          NULL
+        }
+      )
+    }
+    srt_final@tools[["SCVELO"]] <- scvelo_tools
+    return(srt_final)
+  } else {
+    return(adata)
+  }
+}
+
+velocity_embedding_autoscale <- function(embedding, velocity_embedding) {
+  if (ncol(embedding) < 2L || nrow(embedding) == 0L) {
+    return(velocity_embedding)
+  }
+  rx <- diff(range(embedding[, 1L], na.rm = TRUE))
+  ry <- diff(range(embedding[, 2L], na.rm = TRUE))
+  if (!is.finite(rx) || !is.finite(ry) || rx <= 0 || ry <= 0) {
+    return(velocity_embedding)
+  }
+  bbox_aspect <- ((0.88 - 0.11) * 4.8) / ((0.9 - 0.125) * 6.4)
+  ratio <- bbox_aspect * rx / ry
+  vx <- velocity_embedding[, 1L]
+  vy <- velocity_embedding[, 2L]
+  mean_pixel_norm <- mean(sqrt(vx^2 + (vy * ratio)^2), na.rm = TRUE)
+  if (!is.finite(mean_pixel_norm) || mean_pixel_norm <= 0) {
+    return(velocity_embedding)
+  }
+  sn <- max(10, sqrt(nrow(embedding)))
+  quiver_autoscale <- 1.8 * sn * mean_pixel_norm / (1.1 * rx)
+  velocity_embedding / (3 * quiver_autoscale)
+}
+
+run_scanpy_cpp <- function(
+  srt,
+  assay_x,
+  assay_y,
+  layer_y,
+  group.by,
+  linear_reduction,
+  nonlinear_reduction,
+  n_pcs,
+  n_neighbors,
+  mode,
+  filter_genes = TRUE,
+  min_counts = 3,
+  min_counts_u = 3,
+  min_shared_counts = 30,
+  normalize_per_cell = TRUE,
+  log_transform = TRUE,
+  compute_terminal_states = TRUE,
+  compute_pseudotime = TRUE,
+  compute_velocity_confidence = FALSE,
+  compute_velocity_graph = NULL,
+  fitting_by = c("stochastic", "deterministic", "em", "nm"),
+  use_raw = FALSE,
+  diff_kinetics = FALSE,
+  denoise = FALSE,
+  denoise_topn = 3,
+  kinetics = FALSE,
+  kinetics_topn = 100,
+  calculate_velocity_genes = FALSE,
+  magic_impute = FALSE,
+  magic_knn = 5,
+  magic_t = 2,
+  max_dense_gib = 8,
+  cores,
+  return_seurat,
+  verbose = TRUE
+) {
+  if (is.null(srt)) {
+    log_message(
+      "{.arg backend = 'cpp'} requires {.arg srt}",
+      message_type = "error"
+    )
+  }
+  if (!isTRUE(return_seurat)) {
+    log_message(
+      "{.arg backend = 'cpp'} returns a {.cls Seurat} object only",
+      message_type = "error"
+    )
+  }
+  if (is.character(mode) && length(mode) == 1L) {
+    mode <- list(mode)
+  }
+  mode_use <- unlist(mode, use.names = FALSE)
+  if (!all(mode_use %in% c("stochastic", "deterministic", "dynamical"))) {
+    log_message(
+      "{.arg backend = 'cpp'} supports {.arg mode = 'stochastic'}, {.arg mode = 'deterministic'}, and {.arg mode = 'dynamical'}",
+      message_type = "error"
+    )
+  }
+  if (length(assay_y) < 2L) {
+    log_message(
+      "{.arg assay_y} must contain spliced and unspliced assay names",
+      message_type = "error"
+    )
+  }
+  if (is.null(compute_velocity_graph)) {
+    compute_velocity_graph <- isTRUE(compute_terminal_states) ||
+      isTRUE(compute_pseudotime)
+  }
+  spliced_assay <- assay_y[[1L]]
+  unspliced_assay <- assay_y[[2L]]
+  missing_assays <- setdiff(
+    c(spliced_assay, unspliced_assay),
+    names(srt@assays)
+  )
+  if (length(missing_assays) > 0L) {
+    log_message(
+      "Missing velocity assays: {.val {missing_assays}}",
+      message_type = "error"
+    )
+  }
+
+  if (is.null(linear_reduction)) {
+    linear_reduction <- DefaultReduction(srt)
+  } else {
+    linear_reduction <- DefaultReduction(srt, pattern = linear_reduction)
+  }
+  if (is.null(nonlinear_reduction)) {
+    nonlinear_reduction <- DefaultReduction(srt)
+  } else {
+    nonlinear_reduction <- DefaultReduction(srt, pattern = nonlinear_reduction)
+  }
+  if (!linear_reduction %in% names(srt@reductions)) {
+    log_message(
+      "{.val {linear_reduction}} is not in the srt reduction names",
+      message_type = "error"
+    )
+  }
+  if (!nonlinear_reduction %in% names(srt@reductions)) {
+    log_message(
+      "{.val {nonlinear_reduction}} is not in the srt reduction names",
+      message_type = "error"
+    )
+  }
+
+  spliced_raw <- GetAssayData5(srt, assay = spliced_assay, layer = layer_y)
+  unspliced_raw <- GetAssayData5(srt, assay = unspliced_assay, layer = layer_y)
+  features <- intersect(rownames(spliced_raw), rownames(unspliced_raw))
+  if (length(features) == 0L) {
+    log_message(
+      "No shared features are available for {.fn RunSCVELO} cpp backend",
+      message_type = "error"
+    )
+  }
+  cells <- colnames(srt)
+  spliced_raw <- spliced_raw[features, cells, drop = FALSE]
+  unspliced_raw <- unspliced_raw[features, cells, drop = FALSE]
+
+  log_message(
+    "Running scanpy-compatible preprocessing ({.val {length(features)}} features -> filter + normalize)...",
+    verbose = verbose
+  )
+  initial_spliced_totals <- Matrix::colSums(spliced_raw)
+  initial_unspliced_totals <- Matrix::colSums(unspliced_raw)
+  keep <- if (isTRUE(filter_genes)) {
+    Matrix::rowSums(spliced_raw) >= as.integer(min_counts) &
+      Matrix::rowSums(unspliced_raw) >= as.integer(min_counts_u) &
+      (Matrix::rowSums(spliced_raw) + Matrix::rowSums(unspliced_raw)) >=
+        as.integer(min_shared_counts)
+  } else {
+    rep(TRUE, length(features))
+  }
+  if (sum(keep) < 2L) {
+    log_message(
+      "Too few genes pass filtering for {.fn RunSCVELO} cpp backend",
+      message_type = "error"
+    )
+  }
+  features_out <- features[keep]
+  dense_estimate_gib <- assert_cpp_dense_budget(
+    n_rows = length(features_out),
+    n_cols = length(cells),
+    copies = 6 + 3 * length(mode_use),
+    max_dense_gib = max_dense_gib,
+    context = "RunSCVELO(backend = \"cpp\")"
+  )
+  spliced <- as.matrix(spliced_raw[keep, , drop = FALSE])
+  unspliced <- as.matrix(unspliced_raw[keep, , drop = FALSE])
+  storage.mode(spliced) <- "double"
+  storage.mode(unspliced) <- "double"
+  if (isTRUE(normalize_per_cell)) {
+    normed <- scanpy_normalize_cpp(
+      spliced = spliced,
+      unspliced = unspliced,
+      initial_spliced_totals = initial_spliced_totals,
+      initial_unspliced_totals = initial_unspliced_totals
+    )
+    spliced_n <- normed[["spliced_norm"]]
+    unspliced_n <- normed[["unspliced_norm"]]
+    rm(normed)
+  } else {
+    spliced_n <- spliced
+    unspliced_n <- unspliced
+  }
+  rm(spliced, unspliced, spliced_raw, unspliced_raw)
+  invisible(gc(full = TRUE))
+  linear_embedding_all <- as.matrix(
+    srt@reductions[[linear_reduction]]@cell.embeddings[cells, , drop = FALSE]
+  )
+  dims_use <- seq_len(min(as.integer(n_pcs), ncol(linear_embedding_all)))
+  linear_embedding <- linear_embedding_all[, dims_use, drop = FALSE]
+  storage.mode(linear_embedding) <- "double"
+  knn_nonself <- max(
+    1L,
+    min(as.integer(n_neighbors) - 1L, nrow(linear_embedding) - 1L)
+  )
+  omp_threads <- scop_n_threads(cores)
+  knn <- scanpy_knn_cpp(linear_embedding, knn_nonself, TRUE, omp_threads)
+  knn_k <- ncol(knn[["idx"]])
+  moments <- scanpy_moments_connectivities_cpp(
+    spliced = spliced_n,
+    unspliced = unspliced_n,
+    knn_idx = knn[["idx"]],
+    compute_second_order = "stochastic" %in% mode_use,
+    n_threads = omp_threads
+  )
+  Ms <- moments[["Ms"]]
+  Mu <- moments[["Mu"]]
+  Mss <- moments[["Mss"]]
+  Mus <- moments[["Mus"]]
+  n_moment_features <- nrow(spliced_n)
+  rm(moments, spliced_n, unspliced_n)
+  invisible(gc(full = TRUE))
+
+  nonlinear_embedding <- as.matrix(
+    srt@reductions[[nonlinear_reduction]]@cell.embeddings[cells, , drop = FALSE]
+  )
+  storage.mode(nonlinear_embedding) <- "double"
+
+  srt@tools[["SCVELO"]] <- list(
+    backend = "cpp",
+    implementation = list(
+      exact_reference = FALSE,
+      scope = "velocity estimation, graph projection, and optional terminal-state calculations",
+      dense_working_set_gib_lower_bound = dense_estimate_gib
+    ),
+    group.by = group.by,
+    features = features_out,
+    parameters = list(
+      spliced_assay = spliced_assay,
+      unspliced_assay = unspliced_assay,
+      layer_y = layer_y,
+      linear_reduction = linear_reduction,
+      nonlinear_reduction = nonlinear_reduction,
+      use_rep = linear_reduction,
+      n_pcs = length(dims_use),
+      n_neighbors = as.integer(n_neighbors),
+      knn_k = ncol(knn[["idx"]]),
+      filter_genes = filter_genes,
+      normalize_per_cell = normalize_per_cell,
+      log_transform = log_transform,
+      compute_velocity_graph = isTRUE(compute_velocity_graph),
+      n_genes_filtered = as.integer(length(features_out)),
+      max_dense_gib = max_dense_gib,
+      use_raw = isTRUE(use_raw),
+      diff_kinetics = isTRUE(diff_kinetics),
+      denoise = isTRUE(denoise),
+      kinetics = isTRUE(kinetics),
+      calculate_velocity_genes = isTRUE(calculate_velocity_genes),
+      magic_impute = isTRUE(magic_impute)
+    )
+  )
+
+  for (m in mode_use) {
+    log_message(
+      "Running {.pkg scVelo} {.val {m}} mode with {.arg backend = 'cpp'} ({.val {n_moment_features}} features)",
+      verbose = verbose
+    )
+
+    if (identical(m, "stochastic")) {
+      velocity <- scanpy_stochastic_cpp(
+        Ms = Ms,
+        Mu = Mu,
+        Mss = Mss,
+        Mus = Mus,
+        knn_idx = knn[["idx"]],
+        embedding = nonlinear_embedding,
+        n_threads = omp_threads
+      )
+    } else if (identical(m, "deterministic")) {
+      velocity <- scanpy_deterministic_cpp(
+        Ms = Ms,
+        Mu = Mu,
+        knn_idx = knn[["idx"]],
+        embedding = nonlinear_embedding,
+        fit_offset = FALSE,
+        perc = 95.0,
+        n_threads = omp_threads
+      )
+    } else if (identical(m, "dynamical")) {
+      n_genes <- nrow(Ms)
+      dyn_genes <- seq_len(min(n_genes, 200L))
+      fitting_by <- match.arg(fitting_by)
+      fitting_by <- switch(fitting_by,
+        stochastic = "em",
+        deterministic = "nm",
+        fitting_by
+      )
+      if (identical(fitting_by, "em")) {
+        dyn_fit <- scanpy_dynamical_em_cpp(
+          Ms = Ms,
+          Mu = Mu,
+          use_genes = as.integer(dyn_genes),
+          max_iter_em = 10L,
+          conv_tol = 1e-6
+        )
+      } else {
+        dyn_fit <- scanpy_dynamical_nm_cpp(
+          Ms = Ms,
+          Mu = Mu,
+          use_genes = as.integer(dyn_genes),
+          max_iter = 20L,
+          n_threads = omp_threads
+        )
+      }
+      velocity <- scanpy_dynamical_velocity_cpp(
+        Ms = Ms,
+        Mu = Mu,
+        alpha = dyn_fit[["alpha"]],
+        beta = dyn_fit[["beta"]],
+        gamma = dyn_fit[["gamma"]],
+        t_ = dyn_fit[["t_"]],
+        knn_idx = knn[["idx"]],
+        embedding = nonlinear_embedding,
+        n_threads = omp_threads
+      )
+    } else {
+      log_message("Unknown mode {.val {m}}", message_type = "error")
+    }
+
+    if (length(mode_use) == 1L && exists("Mss", inherits = FALSE)) {
+      rm(Mss, Mus)
+      invisible(gc(full = TRUE))
+    }
+
+    velocity_reduction <- paste0(m, "_", nonlinear_reduction)
+    conf_key <- paste0(m, "_confidence")
+    len_key <- paste0(m, "_length")
+    srt[[conf_key]] <- as.numeric(velocity[["confidence"]])
+    srt[[len_key]] <- as.numeric(velocity[["velocity_length"]])
+
+    srt@tools[["SCVELO"]][[m]] <- list(
+      velocity_reduction = velocity_reduction,
+      confidence_key = conf_key,
+      length_key = len_key
+    )
+    if (identical(m, "dynamical")) {
+      srt@tools[["SCVELO"]][[m]]$alpha <- dyn_fit[["alpha"]]
+      srt@tools[["SCVELO"]][[m]]$beta <- dyn_fit[["beta"]]
+      srt@tools[["SCVELO"]][[m]]$gamma <- dyn_fit[["gamma"]]
+      srt@tools[["SCVELO"]][[m]]$t_ <- dyn_fit[["t_"]]
+      srt@tools[["SCVELO"]][[m]]$loss <- dyn_fit[["loss"]]
+      srt@tools[["SCVELO"]][[m]]$n_fitted <- dyn_fit[["n_fitted"]]
+    } else {
+      srt@tools[["SCVELO"]][[m]]$gamma <- velocity[["gamma"]]
+    }
+    if ("r2" %in% names(velocity)) {
+      srt@tools[["SCVELO"]][[m]]$r2 <- velocity[["r2"]]
+      srt@tools[["SCVELO"]][[m]]$velocity_genes <- velocity[["velocity_genes"]]
+      names(srt@tools[["SCVELO"]][[m]]$velocity_genes) <- features_out
+      if (isTRUE(calculate_velocity_genes)) {
+        srt@tools[["SCVELO"]][[m]]$velocity_gene_names <-
+          features_out[as.logical(velocity[["velocity_genes"]])]
+      }
+    }
+    if ("residual" %in% names(velocity)) {
+      srt@tools[["SCVELO"]][[m]]$residual <- velocity[["residual"]]
+    }
+    vg_residual <- if (!is.null(velocity[["residual"]])) {
+      velocity[["residual"]]
+    } else {
+      velocity[["velocity"]]
+    }
+    graph_gene_idx <- rep(TRUE, nrow(Ms))
+    if ("velocity_genes" %in% names(velocity)) {
+      graph_gene_idx <- as.logical(velocity[["velocity_genes"]])
+      graph_gene_idx[is.na(graph_gene_idx)] <- FALSE
+      if (sum(graph_gene_idx) < 2L) {
+        graph_gene_idx <- rep(TRUE, nrow(Ms))
+      }
+    }
+    if ((isTRUE(denoise) || isTRUE(kinetics)) && "r2" %in% names(velocity)) {
+      top_n <- if (isTRUE(kinetics)) kinetics_topn else denoise_topn
+      selected <- head(order(velocity[["r2"]], decreasing = TRUE), max(2L, as.integer(top_n)))
+      graph_gene_idx[] <- FALSE
+      graph_gene_idx[selected] <- TRUE
+    }
+    if (isTRUE(diff_kinetics) && !is.null(group.by) &&
+      group.by %in% colnames(srt@meta.data)) {
+      groups <- factor(srt@meta.data[[group.by]])
+      differential_gamma <- vapply(levels(groups), function(group) {
+        idx <- which(groups == group)
+        denominator <- rowSums(Ms[, idx, drop = FALSE]^2)
+        rowSums(Ms[, idx, drop = FALSE] * Mu[, idx, drop = FALSE]) /
+          pmax(denominator, .Machine$double.eps)
+      }, numeric(nrow(Ms)))
+      rownames(differential_gamma) <- features_out
+      srt@tools[["SCVELO"]][[m]]$differential_kinetics <- differential_gamma
+    }
+    srt@tools[["SCVELO"]][[m]]$n_velocity_graph_genes <- sum(graph_gene_idx)
+    vc_main <- scanpy_velocity_confidence_cpp(
+      Ms = Ms[graph_gene_idx, , drop = FALSE],
+      residual = vg_residual[graph_gene_idx, , drop = FALSE],
+      knn_idx = knn[["idx"]]
+    )
+    srt[[conf_key]] <- as.numeric(vc_main[["confidence"]])
+    srt[[len_key]] <- as.numeric(vc_main[["velocity_length"]])
+    srt@tools[["SCVELO"]][[m]]$confidence_detail <- vc_main[["confidence"]]
+    srt@tools[["SCVELO"]][[m]]$confidence_diff <- vc_main[["confidence_diff"]]
+    vg <- scanpy_velocity_graph_cpp(
+      Ms = Ms[graph_gene_idx, , drop = FALSE],
+      Mu = Mu[graph_gene_idx, , drop = FALSE],
+      residual = vg_residual[graph_gene_idx, , drop = FALSE],
+      knn_idx = knn[["idx"]],
+      sqrt_transform = identical(m, "stochastic"),
+      n_recurse_neighbors = 1L,
+      n_threads = omp_threads
+    )
+    if (isTRUE(compute_velocity_graph)) {
+      srt@tools[["SCVELO"]][[m]]$velocity_graph <- list(
+        rows = vg[["velocity_graph_rows"]],
+        cols = vg[["velocity_graph_cols"]],
+        vals = vg[["velocity_graph_vals"]],
+        neg_rows = vg[["velocity_graph_neg_rows"]],
+        neg_cols = vg[["velocity_graph_neg_cols"]],
+        neg_vals = vg[["velocity_graph_neg_vals"]]
+      )
+    }
+    velocity_embedding_graph <- scanpy_project_velocity_embedding_cpp(
+      graph_rows = vg[["velocity_graph_rows"]],
+      graph_cols = vg[["velocity_graph_cols"]],
+      graph_vals = vg[["velocity_graph_vals"]],
+      graph_neg_rows = vg[["velocity_graph_neg_rows"]],
+      graph_neg_cols = vg[["velocity_graph_neg_cols"]],
+      graph_neg_vals = vg[["velocity_graph_neg_vals"]],
+      embedding = nonlinear_embedding,
+      scale = 10,
+      self_transitions = TRUE,
+      use_negative_cosines = TRUE
+    )
+    velocity_embedding_graph <- velocity_embedding_autoscale(
+      embedding = nonlinear_embedding,
+      velocity_embedding = velocity_embedding_graph
+    )
+    rownames(velocity_embedding_graph) <- cells
+    colnames(velocity_embedding_graph) <- colnames(nonlinear_embedding)
+    srt[[velocity_reduction]] <- SeuratObject::CreateDimReducObject(
+      embeddings = velocity_embedding_graph,
+      assay = spliced_assay,
+      key = paste0(gsub("_", "", velocity_reduction), "_")
+    )
+
+    if (isTRUE(compute_terminal_states) || isTRUE(compute_pseudotime)) {
+      check_r("RSpectra", verbose = FALSE)
+      if (!requireNamespace("RSpectra", quietly = TRUE)) {
+        log_message(
+          "The {.arg backend = 'cpp'} terminal state and pseudotime steps need the optional {.pkg RSpectra} package. Install it with {.code install.packages('RSpectra')}.",
+          message_type = "error"
+        )
+      }
+    }
+    if (isTRUE(compute_terminal_states)) {
+      if (!isTRUE(compute_velocity_graph)) {
+        log_message(
+          "{.arg compute_velocity_graph} must be TRUE when terminal states are requested",
+          message_type = "error"
+        )
+      }
+      ts <- scanpy_terminal_states_graph_cpp(
+        graph_rows = vg[["velocity_graph_rows"]],
+        graph_cols = vg[["velocity_graph_cols"]],
+        graph_vals = vg[["velocity_graph_vals"]],
+        graph_neg_rows = vg[["velocity_graph_neg_rows"]],
+        graph_neg_cols = vg[["velocity_graph_neg_cols"]],
+        graph_neg_vals = vg[["velocity_graph_neg_vals"]],
+        knn_idx = knn[["idx"]],
+        eps = 1e-3
+      )
+      rc_key <- paste0(m, "_root_cells")
+      ep_key <- paste0(m, "_end_points")
+      srt[[rc_key]] <- as.numeric(ts[["root_cells"]])
+      srt[[ep_key]] <- as.numeric(ts[["end_points"]])
+      srt@tools[["SCVELO"]][[m]]$root_cells <- ts[["root_cells"]]
+      srt@tools[["SCVELO"]][[m]]$end_points <- ts[["end_points"]]
+    }
+
+    if (isTRUE(compute_pseudotime) && isTRUE(compute_terminal_states)) {
+      vpt_result <- scanpy_pseudotime_graph_cpp(
+        graph_rows = vg[["velocity_graph_rows"]],
+        graph_cols = vg[["velocity_graph_cols"]],
+        graph_vals = vg[["velocity_graph_vals"]],
+        graph_neg_rows = vg[["velocity_graph_neg_rows"]],
+        graph_neg_cols = vg[["velocity_graph_neg_cols"]],
+        graph_neg_vals = vg[["velocity_graph_neg_vals"]],
+        knn_idx = knn[["idx"]],
+        root_cells = ts[["root_cells"]],
+        end_points = ts[["end_points"]],
+        n_dcs = 10L
+      )
+      vpt <- as.numeric(vpt_result[["pseudotime"]])
+      pt_key <- paste0(m, "_pseudotime")
+      srt[[pt_key]] <- as.numeric(vpt)
+      srt@tools[["SCVELO"]][[m]]$pseudotime <- vpt
+      srt@tools[["SCVELO"]][[m]]$pseudotime_raw <- as.numeric(vpt_result[[
+        "pseudotime_root"
+      ]])
+      srt@tools[["SCVELO"]][[
+        m
+      ]]$pseudotime_end_inverse <- as.numeric(vpt_result[[
+        "pseudotime_end_inverse"
+      ]])
+      srt@tools[["SCVELO"]][[m]]$root_cell <- vpt_result[["root_cell"]]
+      srt@tools[["SCVELO"]][[m]]$end_cell <- vpt_result[["end_cell"]]
+      srt@tools[["SCVELO"]][[m]]$diffusion_components <- vpt_result[[
+        "diffusion_components"
+      ]]
+    }
+
+    if (isTRUE(compute_velocity_confidence)) {
+      srt@tools[["SCVELO"]][[m]]$confidence_detail <- vc_main[["confidence"]]
+      srt@tools[["SCVELO"]][[m]]$confidence_diff <- vc_main[["confidence_diff"]]
+    }
+
+    log_message(
+      "{.pkg scVelo} {.val {m}} mode completed",
+      message_type = "success",
+      verbose = verbose
+    )
+  }
+
+  if (isTRUE(magic_impute)) {
+    magic_k <- min(max(1L, as.integer(magic_knn)), ncol(knn[["idx"]]))
+    rows <- rep(seq_len(ncol(srt)), each = magic_k)
+    cols <- as.vector(t(knn[["idx"]][, seq_len(magic_k), drop = FALSE]))
+    transition <- Matrix::sparseMatrix(
+      i = rows, j = cols, x = 1 / magic_k,
+      dims = c(ncol(srt), ncol(srt))
+    )
+    transition <- transition + Matrix::Diagonal(ncol(srt))
+    transition <- Matrix::Diagonal(x = 1 / Matrix::rowSums(transition)) %*% transition
+    power <- max(1L, as.integer(magic_t))
+    smoothed <- transition
+    if (power > 1L) for (i in 2:power) smoothed <- smoothed %*% transition
+    srt@tools[["SCVELO"]]$magic_imputed_data <- Ms %*% Matrix::t(smoothed)
+    rownames(srt@tools[["SCVELO"]]$magic_imputed_data) <- features_out
+    colnames(srt@tools[["SCVELO"]]$magic_imputed_data) <- colnames(srt)
+  }
+
+  srt@tools[["SCVELO"]]$mode <- mode_use
+  log_message(
+    "{.pkg scVelo} cpp backend completed",
+    message_type = "success",
+    verbose = verbose
+  )
+  srt
+}

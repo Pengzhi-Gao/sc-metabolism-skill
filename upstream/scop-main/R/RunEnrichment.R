@@ -1,0 +1,614 @@
+#' @title Perform the enrichment analysis (over-representation) on the genes
+#'
+#' @md
+#' @inheritParams GeneConvert
+#' @inheritParams PrepareDB
+#' @inheritParams CellDimPlot
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A `Seurat` object or `SummarizedExperiment` object containing the
+#' results of differential expression analysis ([RunDEtest()]).
+#' If specified, the genes and groups will be extracted from the object automatically.
+#' If not specified, the `geneID` and `geneID_groups` arguments must be provided.
+#' @param test.use Test to be used in differential expression analysis.
+#' This argument is only used if `object` is specified.
+#' @param DE_threshold Filter condition for differential expression analysis.
+#' This argument is only used if `object` is specified.
+#' @param geneID Gene IDs.
+#' @param geneID_groups A factor vector specifying the group labels for each gene.
+#' @param geneID_exclude Gene IDs to be excluded from the analysis.
+#' @param IDtype Type of gene IDs in the `object` object or `geneID` argument.
+#' This argument is used to convert the gene IDs to a different type if `IDtype` is different from `result_IDtype`.
+#' @param result_IDtype Desired type of gene ID to be used in the output.
+#' This argument is used to convert the gene IDs from `IDtype` to `result_IDtype`.
+#' @param backend Enrichment backend. `"cpp"` is the default and uses a fast native
+#' hypergeometric ORA implementation and returns the enrichment table without
+#' `enrichResult` objects. `"r"` uses [clusterProfiler::enricher()] and returns
+#' `enrichResult` objects in `results`. `GO_simplify = TRUE` currently uses the R backend.
+#' @param db_combine Whether to combine multiple databases into one.
+#' If `TRUE`, all database specified by `db` will be combined as one named "Combined".
+#' @param features A named list of feature lists for custom enrichment gene sets.
+#' If provided, it takes precedence over `TERM2GENE` and `db`.
+#' @param TERM2GENE A data frame specifying the gene-term mapping for a custom database.
+#' The first column should contain the term IDs, and the second column should contain the gene IDs.
+#' @param TERM2NAME A data frame specifying the term-name mapping for a custom database.
+#' The first column should contain the term IDs, and the second column should contain the corresponding term names.
+#' @param minGSSize The minimum size of a gene set to be considered in the enrichment analysis.
+#' @param maxGSSize The maximum size of a gene set to be considered in the enrichment analysis.
+#' @param unlimited_db Names of databases that do not have size restrictions.
+#' @param GO_simplify Whether to simplify the GO terms.
+#' If `TRUE`, additional results with simplified GO terms will be returned.
+#' @param GO_simplify_cutoff Filter condition for simplification of GO terms.
+#' This argument is only used if `GO_simplify` is `TRUE`.
+#' @param simplify_method Method to be used for simplification of GO terms.
+#' This argument is only used if `GO_simplify` is `TRUE`.
+#' @param simplify_similarityCutoff The similarity cutoff for simplification of GO terms.
+#' This argument is only used if `GO_simplify` is `TRUE`.
+#'
+#' @return
+#' If input is a Seurat object, returns the modified Seurat object with the enrichment result stored in the tools slot.
+#'
+#' If input is a geneID vector with or without geneID_groups, return the enrichment result directly.
+#'
+#' Enrichment result is a list with the following component:
+#' \itemize{
+#'  \item `enrichment`: A data.frame containing all enrichment results.
+#'  \item `results`: A list of `enrichResult` objects from the DOSE package.
+#'  \item `geneMap`: A data.frame containing the ID mapping table for input gene IDs.
+#'  \item `input`: A data.frame containing the input gene IDs and gene ID groups.
+#'  \item `DE_threshold`: A specific threshold for differential expression analysis (only returned if input is a Seurat object).
+#' }
+#'
+#' @seealso
+#' [PrepareDB], [ListDB], [EnrichmentPlot], [RunGSEA], [GSEAPlot]
+#'
+#' @export
+#'
+#' @examples
+#' term2gene <- data.frame(
+#'   Term = c(
+#'     rep("Endocrine markers", 5),
+#'     rep("Exocrine markers", 5),
+#'     rep("Ductal markers", 5)
+#'   ),
+#'   symbol = c(
+#'     "INS", "GCG", "SST", "IAPP", "PCSK1",
+#'     "PRSS1", "CPA1", "CELA3A", "REG1A", "CTRB1",
+#'     "KRT19", "SOX9", "MUC1", "CFTR", "KRT7"
+#'   )
+#' )
+#' gene_groups <- rep(c("Cluster1", "Cluster2"), each = 6)
+#' enrich_out <- RunEnrichment(
+#'   geneID = c(
+#'     "INS", "GCG", "SST", "IAPP", "PRSS1", "CPA1",
+#'     "KRT19", "SOX9", "MUC1", "CFTR", "KRT7", "REG1A"
+#'   ),
+#'   geneID_groups = gene_groups,
+#'   TERM2GENE = term2gene,
+#'   minGSSize = 2
+#' )
+#' EnrichmentPlot(
+#'   res = enrich_out,
+#'   db = "custom",
+#'   plot_type = "comparison"
+#' )
+RunEnrichment <- function(
+  object = NULL,
+  group.by = NULL,
+  test.use = "wilcox",
+  DE_threshold = "avg_log2FC > 0 & p_val_adj < 0.05",
+  geneID = NULL,
+  geneID_groups = NULL,
+  geneID_exclude = NULL,
+  IDtype = "symbol",
+  result_IDtype = "symbol",
+  backend = c("cpp", "r"),
+  species = "Homo_sapiens",
+  db = "GO_BP",
+  db_update = FALSE,
+  db_version = "latest",
+  db_combine = FALSE,
+  convert_species = TRUE,
+  Ensembl_version = NULL,
+  mirror = NULL,
+  features = NULL,
+  TERM2GENE = NULL,
+  TERM2NAME = NULL,
+  minGSSize = 10,
+  maxGSSize = 500,
+  unlimited_db = c("Chromosome", "GeneType", "TF", "Enzyme", "CSPA"),
+  GO_simplify = FALSE,
+  GO_simplify_cutoff = "p.adjust < 0.05",
+  simplify_method = "Wang",
+  simplify_similarityCutoff = 0.7,
+  verbose = TRUE,
+  ...,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  log_message("Start {.pkg Enrichment} analysis", verbose = verbose)
+  species <- normalize_species_name(species)
+  backend <- match.arg(backend)
+  direct_cpp_custom <- identical(backend, "cpp") &&
+    is.null(features) &&
+    !is.null(TERM2GENE) &&
+    !isTRUE(db_combine) &&
+    !isTRUE(GO_simplify) &&
+    is.null(srt)
+  if (identical(backend, "cpp") && isTRUE(GO_simplify)) {
+    log_message(
+      "{.arg GO_simplify = TRUE} requires {.pkg clusterProfiler} result objects; using {.arg backend = 'r'} for this run.",
+      message_type = "warning",
+      verbose = verbose
+    )
+    backend <- "r"
+  }
+  if (identical(backend, "r")) {
+    check_r("clusterProfiler", verbose = FALSE)
+  }
+  use_object <- !is.null(srt)
+  if (is.null(geneID) && !is.null(srt)) {
+    de_df <- resolve_detest_result(
+      object = srt,
+      group.by = group.by,
+      test.use = test.use
+    )
+    de_df <- filter_de_results(
+      de_results = de_df,
+      DE_threshold = DE_threshold
+    )
+    de_use <- prepare_de_for_pathway(
+      de_results = de_df,
+      require_score = FALSE
+    )
+    if (is.null(de_use) || nrow(de_use) == 0) {
+      log_message(
+        "Cannot find filtered DEtest results. You may perform {.fn RunDEtest} first or relax {.arg DE_threshold}.",
+        message_type = "error"
+      )
+    }
+    geneID <- de_use$gene
+    geneID_groups <- de_use$comparison
+  }
+
+  if (is.null(geneID_groups)) {
+    geneID_groups <- rep(" ", length(geneID))
+  }
+  if (!is.factor(geneID_groups)) {
+    geneID_groups <- factor(geneID_groups, levels = unique(geneID_groups))
+  }
+  geneID_groups <- factor(
+    geneID_groups,
+    levels = levels(geneID_groups)[levels(geneID_groups) %in% geneID_groups]
+  )
+  if (length(geneID_groups) != length(geneID)) {
+    log_message(
+      "length(geneID_groups)!=length(geneID)",
+      message_type = "error"
+    )
+  }
+  names(geneID_groups) <- geneID
+  input <- data.frame(geneID = geneID, geneID_groups = geneID_groups)
+  input <- input[!geneID %in% geneID_exclude, , drop = FALSE]
+
+  if (!is.null(features)) {
+    db <- "custom"
+    custom_db <- create_custom_db_list_from_features(
+      species = species,
+      db = db,
+      features = features,
+      IDtype = IDtype,
+      version = "custom"
+    )
+    db_list <- custom_db[["db_list"]]
+    TERM2GENE <- custom_db[["TERM2GENE"]]
+    TERM2NAME <- custom_db[["TERM2NAME"]]
+  } else if (is.null(TERM2GENE)) {
+    db_list <- PrepareDB(
+      species = species,
+      db = db,
+      db_update = db_update,
+      db_version = db_version,
+      db_IDtypes = IDtype,
+      convert_species = convert_species,
+      Ensembl_version = Ensembl_version,
+      mirror = mirror,
+      ...
+    )
+  } else {
+    db <- "custom"
+    custom_db <- create_custom_db_list(
+      species = species,
+      db = db,
+      TERM2GENE = TERM2GENE,
+      TERM2NAME = TERM2NAME,
+      IDtype = IDtype,
+      version = "custom"
+    )
+    db_list <- custom_db[["db_list"]]
+    TERM2GENE <- custom_db[["TERM2GENE"]]
+    TERM2NAME <- custom_db[["TERM2NAME"]]
+  }
+  if (isTRUE(db_combine)) {
+    log_message("Create 'Combined' database ...")
+    TERM2GENE <- do.call(
+      rbind,
+      lapply(
+        db_list[[species]],
+        function(x) x[["TERM2GENE"]][, c("Term", IDtype)]
+      )
+    )
+    TERM2NAME <- do.call(
+      rbind,
+      lapply(names(db_list[[species]]), function(x) {
+        db_list[[species]][[x]][["TERM2NAME"]][["Name"]] <- paste0(
+          db_list[[species]][[x]][["TERM2NAME"]][["Name"]],
+          " [",
+          x,
+          "]"
+        )
+        db_list[[species]][[x]][["TERM2NAME"]][, c("Term", "Name")]
+      })
+    )
+    version <- unlist(lapply(
+      db_list[[species]],
+      function(x) as.character(x[["version"]])
+    ))
+    version <- paste0(names(version), ":", version, collapse = ";")
+    db <- "Combined"
+    db_list[[species]][[db]][["TERM2GENE"]] <- unique(TERM2GENE)
+    db_list[[species]][[db]][["TERM2NAME"]] <- unique(TERM2NAME)
+    db_list[[species]][[db]][["version"]] <- unique(version)
+  }
+
+  if (length(unique(c(IDtype, result_IDtype))) != 1) {
+    res <- GeneConvert(
+      geneID = unique(geneID),
+      geneID_from_IDtype = IDtype,
+      geneID_to_IDtype = result_IDtype,
+      species_from = species,
+      species_to = species,
+      Ensembl_version = Ensembl_version,
+      mirror = mirror
+    )
+    geneMap <- res$geneID_collapse
+    colnames(geneMap)[colnames(geneMap) == "from_geneID"] <- IDtype
+  } else {
+    geneMap <- data.frame(IDtype = unique(geneID), row.names = unique(geneID))
+    colnames(geneMap)[1] <- IDtype
+  }
+
+  if (isTRUE(direct_cpp_custom) && identical(IDtype, result_IDtype)) {
+    input[[IDtype]] <- as.character(input$geneID)
+  } else {
+    input[[IDtype]] <- geneMap[as.character(input$geneID), IDtype]
+    input[[result_IDtype]] <- geneMap[as.character(input$geneID), result_IDtype]
+    input <- unnest_fun(input, cols = c(IDtype, result_IDtype))
+    input <- input[!is.na(input[[IDtype]]), , drop = FALSE]
+  }
+
+  if (isTRUE(direct_cpp_custom)) {
+    term <- db[[1]]
+    TERM2GENE_tmp <- db_list[[species]][[term]][["TERM2GENE"]][, c(
+      "Term",
+      IDtype
+    )]
+    TERM2NAME_tmp <- db_list[[species]][[term]][["TERM2NAME"]]
+    if (!anyNA(TERM2GENE_tmp) && !anyDuplicated(TERM2GENE_tmp)) {
+      keep_term_gene <- rep(TRUE, nrow(TERM2GENE_tmp))
+    } else {
+      keep_term_gene <- !duplicated(TERM2GENE_tmp) &
+        stats::complete.cases(TERM2GENE_tmp)
+      TERM2GENE_tmp <- TERM2GENE_tmp[keep_term_gene, , drop = FALSE]
+    }
+    TERM2NAME_tmp <- TERM2NAME_tmp[
+      TERM2NAME_tmp[["Term"]] %in% TERM2GENE_tmp[["Term"]], ,
+      drop = FALSE
+    ]
+    term_version <- paste0(
+      as.character(db_list[[species]][[term]][["version"]]),
+      collapse = ";"
+    )
+    group_levels <- levels(geneID_groups)
+    genes_by_group <- split(input[[IDtype]], input$geneID_groups, drop = TRUE)
+    result_list <- lapply(group_levels, function(group) {
+      gene <- genes_by_group[[group]]
+      if (is.null(gene)) {
+        gene <- character(0)
+      }
+      result <- run_ora_result(
+        gene = gene,
+        TERM2GENE = TERM2GENE_tmp,
+        TERM2NAME = TERM2NAME_tmp,
+        IDtype = IDtype,
+        min_gs_size = ifelse(term %in% unlimited_db, 1, minGSSize),
+        max_gs_size = ifelse(term %in% unlimited_db, Inf, maxGSSize)
+      )
+      if (is.null(result) || nrow(result) == 0L) {
+        return(NULL)
+      }
+      result[["Groups"]] <- group
+      result[["Database"]] <- term
+      result[["Version"]] <- term_version
+      if (!identical(IDtype, result_IDtype)) {
+        IDlist <- strsplit(result$geneID, split = "/")
+        result$geneID <- unlist(lapply(IDlist, function(x) {
+          x_result <- NULL
+          for (i in x) {
+            if (i %in% geneMap[[IDtype]]) {
+              x_result <- c(
+                x_result,
+                unique(geneMap[geneMap[[IDtype]] == i, result_IDtype])
+              )
+            } else {
+              x_result <- c(x_result, i)
+            }
+          }
+          paste0(x_result, collapse = "/")
+        }))
+      }
+      result
+    })
+    names(result_list) <- paste(group_levels, term, sep = "-")
+    results <- result_list[!vapply(result_list, is.null, logical(1))]
+    enrichment <- if (length(results) == 0L) {
+      data.frame()
+    } else {
+      do.call(rbind, results)
+    }
+    rownames(enrichment) <- NULL
+    return(list(
+      enrichment = enrichment,
+      results = results,
+      geneMap = geneMap,
+      input = input,
+      backend = backend
+    ))
+  }
+
+  log_message("Permform enrichment...")
+  comb <- expand.grid(
+    group = levels(geneID_groups),
+    term = db,
+    stringsAsFactors = FALSE
+  )
+  term_inputs <- stats::setNames(
+    lapply(db, function(term) {
+      TERM2GENE_tmp <- db_list[[species]][[term]][["TERM2GENE"]][, c(
+        "Term",
+        IDtype
+      )]
+      TERM2NAME_tmp <- db_list[[species]][[term]][["TERM2NAME"]]
+      keep_term_gene <- !duplicated(TERM2GENE_tmp) &
+        stats::complete.cases(TERM2GENE_tmp)
+      TERM2GENE_tmp <- TERM2GENE_tmp[keep_term_gene, , drop = FALSE]
+      TERM2NAME_tmp <- TERM2NAME_tmp[
+        TERM2NAME_tmp[["Term"]] %in% TERM2GENE_tmp[["Term"]], ,
+        drop = FALSE
+      ]
+      list(
+        TERM2GENE = TERM2GENE_tmp,
+        TERM2NAME = TERM2NAME_tmp,
+        minGSSize = ifelse(term %in% unlimited_db, 1, minGSSize),
+        maxGSSize = ifelse(term %in% unlimited_db, Inf, maxGSSize),
+        version = paste0(
+          as.character(db_list[[species]][[term]][["version"]]),
+          collapse = ";"
+        )
+      )
+    }),
+    db
+  )
+
+  res_list <- lapply(
+    seq_len(nrow(comb)),
+    function(i) {
+      group <- comb[i, "group"]
+      term <- comb[i, "term"]
+      gene <- input[input$geneID_groups == group, IDtype]
+      gene_mapid <- input[input$geneID_groups == group, result_IDtype]
+      term_input <- term_inputs[[term]]
+      TERM2GENE_tmp <- term_input[["TERM2GENE"]]
+      TERM2NAME_tmp <- term_input[["TERM2NAME"]]
+      if (identical(backend, "cpp")) {
+        result <- run_ora_result(
+          gene = gene,
+          TERM2GENE = TERM2GENE_tmp,
+          TERM2NAME = TERM2NAME_tmp,
+          IDtype = IDtype,
+          min_gs_size = term_input[["minGSSize"]],
+          max_gs_size = term_input[["maxGSSize"]]
+        )
+        enrich_res <- result
+      } else {
+        enrich_res <- clusterProfiler::enricher(
+          gene = gene,
+          minGSSize = term_input[["minGSSize"]],
+          maxGSSize = term_input[["maxGSSize"]],
+          pAdjustMethod = "BH",
+          pvalueCutoff = Inf,
+          qvalueCutoff = Inf,
+          universe = NULL,
+          TERM2GENE = TERM2GENE_tmp,
+          TERM2NAME = TERM2NAME_tmp
+        )
+        result <- if (!is.null(enrich_res)) enrich_res@result else NULL
+      }
+
+      if (!is.null(result) && nrow(result) > 0) {
+        result[["Groups"]] <- group
+        result[["Database"]] <- term
+        result[["Version"]] <- term_input[["version"]]
+        if (!identical(IDtype, result_IDtype)) {
+          IDlist <- strsplit(result$geneID, split = "/")
+          result$geneID <- unlist(lapply(IDlist, function(x) {
+            x_result <- NULL
+            for (i in x) {
+              if (i %in% geneMap[[IDtype]]) {
+                x_result <- c(
+                  x_result,
+                  unique(geneMap[geneMap[[IDtype]] == i, result_IDtype])
+                )
+              } else {
+                x_result <- c(x_result, i)
+              }
+            }
+            return(paste0(x_result, collapse = "/"))
+          }))
+        }
+        if (identical(backend, "cpp")) {
+          enrich_res <- result
+        } else {
+          enrich_res@result <- result
+          enrich_res@gene2Symbol <- as.character(gene_mapid)
+        }
+
+        if (
+          identical(backend, "r") &&
+            isTRUE(GO_simplify) && term %in% c("GO", "GO_BP", "GO_CC", "GO_MF")
+        ) {
+          sim_res <- enrich_res
+          if (term == "GO") {
+            sim_res@result[["ONTOLOGY"]] <- stats::setNames(
+              TERM2NAME_tmp[["ONTOLOGY"]],
+              TERM2NAME_tmp[["Term"]]
+            )[sim_res@result[["ID"]]]
+            sim_res@ontology <- "GOALL"
+          } else {
+            sim_res@ontology <- gsub(
+              pattern = "GO_",
+              replacement = "",
+              x = term
+            )
+          }
+          nterm_simplify <- sum(with(
+            sim_res@result,
+            eval(rlang::parse_expr(GO_simplify_cutoff))
+          ))
+          if (nterm_simplify > 0) {
+            sim_res@result <- sim_res@result[
+              with(sim_res@result, eval(rlang::parse_expr(GO_simplify_cutoff))), ,
+              drop = FALSE
+            ]
+          }
+          if (nterm_simplify <= 1) {
+            log_message(
+              group,
+              "|",
+              term,
+              " has <= 1 term to simplify.",
+              message_type = "warning"
+            )
+          } else {
+            semData <- db_list[[species]][[term]][["semData"]]
+            sim_res <- clusterProfiler::simplify(
+              sim_res,
+              measure = simplify_method,
+              cutoff = simplify_similarityCutoff,
+              semData = semData
+            )
+          }
+          if (nrow(sim_res@result) > 0) {
+            result_sim <- sim_res@result
+            result_sim[["Groups"]] <- group
+            result_sim[["Database"]] <- paste0(term, "_sim")
+            result_sim[["Version"]] <- paste0(
+              as.character(db_list[[species]][[term]][["version"]]),
+              collapse = ";"
+            )
+            result_sim[["ONTOLOGY"]] <- NULL
+            sim_res@result <- result_sim
+            enrich_res <- list(enrich_res, sim_res)
+            names(enrich_res) <- paste(
+              group,
+              c(term, paste0(term, "_sim")),
+              sep = "-"
+            )
+          }
+        }
+      } else {
+        enrich_res <- NULL
+      }
+      enrich_res
+    }
+  )
+
+  nm <- paste(comb$group, comb$term, sep = "-")
+  if (identical(backend, "cpp")) {
+    names(res_list) <- nm
+    results <- res_list[!sapply(res_list, is.null)]
+    results <- results[intersect(nm, names(results))]
+    enrichment <- do.call(rbind, results)
+  } else {
+    sim_index <- sapply(res_list, function(x) length(x) == 2)
+    sim_list <- unlist(res_list[sim_index], recursive = FALSE)
+    raw_list <- res_list[!sim_index]
+    names(raw_list) <- nm[!sim_index]
+    results <- c(raw_list, sim_list)
+    results <- results[!sapply(results, is.null)]
+    results <- results[intersect(c(nm, paste0(nm, "_sim")), names(results))]
+    enrichment <- do.call(rbind, lapply(results, function(x) x@result))
+  }
+  if (is.null(enrichment)) {
+    enrichment <- data.frame()
+  }
+  rownames(enrichment) <- NULL
+
+  log_message(
+    "{.pkg Enrichment} analysis done",
+    message_type = "success", verbose = verbose
+  )
+
+  res <- list(
+    enrichment = enrichment,
+    results = results,
+    geneMap = geneMap,
+    input = input,
+    backend = backend
+  )
+  if (isTRUE(use_object) && inherits(srt, "Seurat")) {
+    group.by <- group.by %||% "custom"
+    result_key <- paste("Enrichment", group.by, test.use, sep = "_")
+    if (!is.null(srt@tools[[result_key]][["enrichment"]])) {
+      old_enrichment <- srt@tools[[result_key]][["enrichment"]]
+      if (
+        isTRUE(GO_simplify) &&
+          all(c("Database", "Groups") %in% colnames(old_enrichment))
+      ) {
+        go_terms <- intersect(db, c("GO", "GO_BP", "GO_CC", "GO_MF"))
+        sim_missing <- paste0(go_terms, "_sim")
+        sim_missing <- sim_missing[
+          !sim_missing %in% unique(c(enrichment[["Database"]], old_enrichment[["Database"]]))
+        ]
+        if (length(sim_missing) > 0) {
+          sim_rows <- old_enrichment[
+            old_enrichment[["Database"]] %in% sub("_sim$", "", sim_missing), ,
+            drop = FALSE
+          ]
+          if (nrow(sim_rows) > 0) {
+            sim_rows[["Database"]] <- paste0(sim_rows[["Database"]], "_sim")
+            enrichment <- dplyr::bind_rows(enrichment, sim_rows)
+          }
+        }
+      }
+      enrichment <- unique(dplyr::bind_rows(old_enrichment, enrichment))
+      res[["enrichment"]] <- enrichment
+      if (!is.null(srt@tools[[result_key]][["results"]])) {
+        res[["results"]] <- c(srt@tools[[result_key]][["results"]], res[["results"]])
+      }
+    }
+    srt@tools[[result_key]] <- utils::modifyList(res, list(DE_threshold = DE_threshold))
+    return(srt)
+  }
+  if (isTRUE(use_object) && inherits(srt, "SummarizedExperiment")) {
+    return(
+      store_meta(
+        srt,
+        "Enrichment",
+        utils::modifyList(res, list(DE_threshold = DE_threshold))
+      )
+    )
+  } else {
+    return(res)
+  }
+}

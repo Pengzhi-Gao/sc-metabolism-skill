@@ -1,0 +1,3093 @@
+#' @title CCC heatmap and dot matrix plot
+#'
+#' @md
+#' @inheritParams CCCStatPlot
+#' @inheritParams scop-params
+#' @param plot_type Plot type. One of `"heatmap"` or `"dot"`.
+#' `"bubble"` is a CellChat-specific interaction bubble matrix.
+#' `"ligand_target"` is a special heatmap path available only with
+#' `NicheNet`/`MultiNicheNet` results. `"role_heatmap"` and `"diff_heatmap"`
+#' are CellChat-specific pathway role views.
+#' @param top_anno,bottom_anno Column-side annotations for sender groups.
+#' Each side accepts `NULL`, `"bar"`, `"box"`, `"point"`, `"line"`,
+#' `"histogram"`, `"density"`, `"violin"`, `"cell"`, or a character vector
+#' containing multiple values.
+#' Defaults are `top_anno = "bar"` and `bottom_anno = "cell"`.
+#' @param left_anno,right_anno Row-side annotations for receiver groups.
+#' Each side accepts `NULL`, `"bar"`, `"box"`, `"point"`, `"line"`,
+#' `"histogram"`, `"density"`, `"violin"`, `"cell"`, or a character vector
+#' containing multiple values.
+#' Defaults are `left_anno = "bar"` and `right_anno = "cell"`.
+#' @param bar_value Aggregation metric shown in the bar annotations.
+#' One or more of `"count"`, `"sum"`, `"mean"`, or `"max"`.
+#' Multiple values add multiple annotation tracks. Default `"sum"`.
+#' @param add_text Logical. Show numeric value labels inside each cell (heatmap mode only).
+#' Default `TRUE` for aggregation mode, `FALSE` for interaction mode.
+#' @param cluster_rows,cluster_columns Whether to cluster heatmap rows/columns.
+#'   Defaults are both `FALSE`.
+#' @param color.by For interaction heatmaps, value used for tile coloring.
+#'   Usually `"score"` or `"pvalue"`.
+#' @param show_row_names,show_column_names Whether to draw row/column names for
+#'   the heatmap body.
+#' @param border Logical. Whether to draw borders for the heatmap body and all
+#'   annotation tracks. Default `TRUE`.
+#' @param value_palette Palette used for heatmap value fills.
+#' @param value_palcolor Optional custom colors for `value_palette`.
+#' @param width,height Optional heatmap body width and height. When only one is
+#'   supplied, the other is inferred from the matrix dimensions to keep cells
+#'   square. When both are `NULL`, a square-cell size is computed automatically.
+#' @param units Units for `width` and `height`. Default `"inch"`.
+#'
+#' @return A ggplot / patchwork object wrapping the ComplexHeatmap grob.
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#'
+#' pc1 <- Seurat::Embeddings(pancreas_sub, "Standardpca")[, 1]
+#' ct <- as.character(pancreas_sub$CellType)
+#' ct_medians <- tapply(pc1, ct, median)
+#' pancreas_sub$Condition <- ifelse(
+#'   pc1 > ct_medians[ct],
+#'   "ConditionA",
+#'   "ConditionB"
+#' )
+#'
+#' pancreas_sub <- RunCellChat(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   group_column = "Condition",
+#'   group_cmp = list(c("ConditionA", "ConditionB")),
+#'   species = "Mus_musculus"
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "heatmap",
+#'   display_by = "aggregation",
+#'   top_n = 20
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "dot",
+#'   display_by = "interaction",
+#'   sender.use = "Ductal",
+#'   top_n = 20
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "dot",
+#'   display_by = "interaction",
+#'   receiver.use = "Ngn3-low-EP",
+#'   top_n = 20
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "heatmap",
+#'   display_by = "aggregation",
+#'   top_n = 20
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "heatmap",
+#'   display_by = "interaction",
+#'   facet_by = "sender",
+#'   top_n = 10
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "heatmap",
+#'   display_by = "interaction",
+#'   facet_by = "sender",
+#'   color.by = "pvalue",
+#'   top_n = 10
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "bubble",
+#'   top_n = 5
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA_vs_ConditionB",
+#'   plot_type = "bubble",
+#'   top_n = 5
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "role_heatmap",
+#'   #' pattern = "outgoing",
+#'   width = 0.6,
+#'   height = 2.5
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA",
+#'   plot_type = "role_heatmap",
+#'   pattern = "outgoing",
+#'   width = 0.6,
+#'   height = 2.5
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA_vs_ConditionB",
+#'   plot_type = "role_heatmap",
+#'   pattern = "incoming",
+#'   palette = "Paired",
+#'   width = 0.6,
+#'   height = 3.5
+#' )
+#'
+#' CCCHeatmap(
+#'   pancreas_sub,
+#'   method = "CellChat",
+#'   condition = "ConditionA_vs_ConditionB",
+#'   plot_type = "diff_heatmap",
+#'   pattern = "all",
+#'   palette = "Paired",
+#'   top_n = 20,
+#'   width = 0.6,
+#'   height = 3.5
+#' )
+CCCHeatmap <- function(
+  object,
+  method = NULL,
+  condition = NULL,
+  dataset = 1,
+  comparison = c(1, 2),
+  plot_type = c("heatmap", "focused_heatmap", "dot", "matrix_dot", "tile", "source_target_dot", "source_target_tile", "sample_dot", "bubble", "bubble_lr", "pathway_bubble", "ligand_target", "role_heatmap", "role_network", "role_network_marsilea", "diff_heatmap"),
+  display_by = c("aggregation", "interaction"),
+  sender.use = NULL,
+  receiver.use = NULL,
+  ligand.use = NULL,
+  receptor.use = NULL,
+  interaction.use = NULL,
+  signaling = NULL,
+  pairLR.use = NULL,
+  slot.name = "net",
+  thresh = 0.05,
+  measure = c("count", "weight"),
+  pattern = c("outgoing", "incoming", "all"),
+  value = "sum",
+  top_n = 500,
+  top_anno = "bar",
+  right_anno = "cell",
+  left_anno = "bar",
+  bottom_anno = "cell",
+  bar_value = "sum",
+  add_text = NULL,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  color.by = c("score", "pvalue"),
+  x_text_angle = 90,
+  facet_by = NULL,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  edge_value = c("sum", "mean", "max", "count"),
+  border = TRUE,
+  value_palette = "RdBu",
+  value_palcolor = NULL,
+  cell_palette = "Chinese",
+  cell_palcolor = NULL,
+  palette = "Chinese",
+  palcolor = NULL,
+  width = NULL,
+  height = NULL,
+  units = "inch",
+  title = NULL,
+  subtitle = NULL,
+  legend.position = "right",
+  legend.direction = "vertical",
+  font.size = 10,
+  theme_use = "theme_scop",
+  theme_args = list(),
+  verbose = TRUE,
+  combine_methods = c("separate", "support", "rank", "legacy"),
+  resource = NULL,
+  sample = NULL,
+  ...,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  value_supplied <- !missing(value)
+  edge_value_supplied <- !missing(edge_value)
+  bar_value_supplied <- !missing(bar_value)
+  dots <- list(...)
+  dot_names <- names(dots)
+  return.data <- isTRUE(dots[["return.data"]])
+  remove.isolate <- if (is.null(dots[["remove.isolate"]])) {
+    TRUE
+  } else {
+    isTRUE(dots[["remove.isolate"]])
+  }
+  finish_plot <- function(plot) {
+    plot
+  }
+  bubble_color.by <- dots[["bubble_color.by"]] %||% "prob"
+  bubble_size.range <- dots[["bubble_size.range"]] %||% c(1.5, 8)
+  angle.x <- dots[["angle.x"]] %||% x_text_angle
+  hjust.x <- dots[["hjust.x"]] %||% 1
+  vjust.x <- dots[["vjust.x"]] %||% 1
+  aspect.ratio <- dots[["aspect.ratio"]] %||% NULL
+  sender.use <- ccc_alias_arg(dots, "sender_use", sender.use)
+  receiver.use <- ccc_alias_arg(dots, "receiver_use", receiver.use)
+  ligand.use <- ccc_alias_arg(dots, "ligand_use", ligand.use)
+  receptor.use <- ccc_alias_arg(dots, "receptor_use", receptor.use)
+  interaction.use <- ccc_alias_arg(dots, "interaction_use", interaction.use)
+  pairLR.use <- ccc_alias_arg(dots, "pair_lr_use", pairLR.use)
+  thresh <- ccc_alias_arg(dots, "pvalue_threshold", thresh)
+  color.by <- ccc_alias_arg(dots, "color_by", color.by)
+  show_column_names <- ccc_alias_arg(
+    dots,
+    c("show_col_names", "show_column_names"),
+    show_column_names
+  )
+  ncols <- ccc_alias_arg(dots, "ncols", NULL)
+  nrows <- ccc_alias_arg(dots, "nrows", NULL)
+  top_n_pairs <- ccc_alias_arg(dots, "top_n_pairs", NULL)
+  sample_key <- ccc_alias_arg(dots, "sample_key", "sample")
+  min_interaction_threshold <- ccc_alias_arg(
+    dots,
+    "min_interaction_threshold",
+    0
+  )
+
+  if ("add_dot" %in% dot_names) {
+    log_message(
+      "{.arg add_dot} has been removed from {.fn CCCHeatmap}. Use {.code plot_type = 'dot'} instead.",
+      message_type = "error"
+    )
+  }
+
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} must be a {.cls Seurat} object",
+      message_type = "error"
+    )
+  }
+
+  display_by <- match.arg(display_by)
+  plot_type <- match.arg(plot_type)
+  plot_type_requested <- plot_type
+  measure <- match.arg(measure)
+  pattern <- match.arg(pattern)
+  edge_value <- match.arg(edge_value)
+  color.by <- match.arg(color.by)
+  if (identical(plot_type, "matrix_dot")) {
+    log_message(
+      "{.val plot_type = 'matrix_dot'} has been removed. Use {.val plot_type = 'dot'} for the OV-style interaction dot plot.",
+      message_type = "error"
+    )
+  }
+  if (identical(plot_type, "source_target_dot")) {
+    log_message(
+      "{.val plot_type = 'source_target_dot'} is a compatibility alias of {.val plot_type = 'dot'}",
+      message_type = "warning"
+    )
+    plot_type <- "dot"
+  }
+  if (identical(plot_type, "source_target_tile")) {
+    log_message(
+      "{.val plot_type = 'source_target_tile'} is a compatibility alias of {.val plot_type = 'tile'}",
+      message_type = "warning"
+    )
+    plot_type <- "tile"
+  }
+  if (identical(plot_type, "focused_heatmap")) {
+    if (!identical(display_by, "aggregation")) {
+      log_message(
+        "{.val plot_type = 'focused_heatmap'} only supports {.arg display_by = 'aggregation'}",
+        message_type = "error"
+      )
+    }
+    ccc_assert_unsupported(
+      plot_type = "focused_heatmap",
+      sender.use = sender.use,
+      receiver.use = receiver.use,
+      interaction.use = interaction.use,
+      pairLR.use = pairLR.use,
+      facet_by = facet_by
+    )
+    ccc_assert_allowed_metrics(
+      plot_type = "focused_heatmap",
+      color.by = color.by,
+      allowed_color.by = "score",
+      value = value,
+      allowed_value = c("sum", "mean")
+    )
+    plot_type <- "heatmap"
+  }
+  if (plot_type %in% c("role_network", "role_network_marsilea")) {
+    log_message(
+      "{.val plot_type = {plot_type}} is rendered with the CellChat role heatmap backend in {.pkg scop}",
+      message_type = "warning"
+    )
+    plot_type <- "role_heatmap"
+  }
+  if (plot_type %in% c("bubble_lr", "pathway_bubble")) {
+    if (identical(plot_type, "bubble_lr")) {
+      ccc_assert_unsupported(
+        plot_type = "bubble_lr",
+        signaling = signaling,
+        facet_by = facet_by
+      )
+    } else {
+      ccc_assert_unsupported(
+        plot_type = "pathway_bubble",
+        interaction.use = interaction.use,
+        pairLR.use = pairLR.use,
+        facet_by = facet_by
+      )
+    }
+    plot_type <- "bubble"
+  }
+  if (identical(plot_type, "dot") && !identical(display_by, "interaction")) {
+    log_message(
+      "{.val plot_type = 'dot'} only supports {.arg display_by = 'interaction'}",
+      message_type = "error"
+    )
+  }
+  if (identical(plot_type, "dot") && !is.null(facet_by)) {
+    log_message(
+      "{.arg facet_by} is not used by the OV-style dot plot; filter with {.arg sender.use}/{.arg receiver.use} instead",
+      message_type = "error"
+    )
+  }
+  if (identical(plot_type, "dot") && !is.null(top_n_pairs)) {
+    log_message(
+      "{.arg top_n_pairs} is not used by the OV-style source-target dot plot",
+      message_type = "error"
+    )
+  }
+  default_bar_source <- if (isTRUE(value_supplied)) {
+    value
+  } else if (isTRUE(edge_value_supplied)) {
+    edge_value
+  } else {
+    NULL
+  }
+  if (
+    !isTRUE(bar_value_supplied) &&
+      length(default_bar_source) == 1L &&
+      !is.na(default_bar_source) &&
+      default_bar_source %in% c("count", "sum", "mean", "max")
+  ) {
+    bar_value <- default_bar_source
+  }
+  bar_value <- match.arg(
+    bar_value,
+    choices = c("count", "sum", "mean", "max"),
+    several.ok = TRUE
+  )
+  default_top_bar <- identical(top_anno, "bar")
+  default_left_bar <- identical(left_anno, "bar")
+  default_bottom_cell <- identical(bottom_anno, "cell")
+  default_right_cell <- identical(right_anno, "cell")
+  top_anno <- ccc_match_side_anno(top_anno)
+  right_anno <- ccc_match_side_anno(right_anno)
+  left_anno <- ccc_match_side_anno(left_anno)
+  bottom_anno <- ccc_match_side_anno(bottom_anno)
+  if (plot_type %in% c("heatmap", "bubble") && isTRUE(default_top_bar)) {
+    top_anno <- c("bar", "cell")
+  }
+  if (
+    plot_type %in% c("heatmap", "bubble") &&
+      identical(display_by, "aggregation") &&
+      isTRUE(default_left_bar)
+  ) {
+    left_anno <- c("bar", "cell")
+  }
+  if (plot_type %in% c("heatmap", "bubble") && isTRUE(default_bottom_cell)) {
+    bottom_anno <- NULL
+  }
+  if (plot_type %in% c("heatmap", "bubble") && isTRUE(default_right_cell)) {
+    right_anno <- NULL
+  }
+
+  if ("add_top_bar" %in% dot_names) {
+    top_anno <- ccc_update_side_anno_legacy(
+      side_anno = top_anno,
+      show_bar = isTRUE(dots[["add_top_bar"]])
+    )
+  }
+  if ("add_right_bar" %in% dot_names) {
+    left_anno <- ccc_update_side_anno_legacy(
+      side_anno = left_anno,
+      show_bar = isTRUE(dots[["add_right_bar"]])
+    )
+  }
+
+  if (is.null(cell_palette) || identical(cell_palette, "Chinese")) {
+    cell_palette <- palette
+    cell_palcolor <- palcolor
+  }
+
+  palette_cfg <- ccc_palettes(
+    palette = palette,
+    palcolor = palcolor,
+    value_palette = value_palette,
+    value_palcolor = value_palcolor,
+    cell_palette = cell_palette,
+    cell_palcolor = cell_palcolor
+  )
+
+  method <- detect_method(srt = srt, method = method)
+  combine_methods <- match.arg(combine_methods)
+  srt <- ccc_prepare_filtered_object(
+    srt = srt,
+    method = method,
+    resource = resource,
+    condition = if (identical(method, "CellChat")) NULL else condition,
+    sample = sample
+  )
+  if (identical(method, "CCC") && identical(combine_methods, "separate")) {
+    return(ccc_plot_methods_separately(match.call(), srt = srt, env = parent.frame()))
+  }
+  srt <- ccc_prepare_combined_object(
+    srt = srt,
+    method = method,
+    combine_methods = combine_methods
+  )
+
+  if (
+    identical(plot_type_requested, "bubble_lr") &&
+      is.null(pairLR.use) &&
+      is.null(interaction.use)
+  ) {
+    log_message(
+      "{.arg pairLR.use} or {.arg interaction.use} must be provided for {.val plot_type = 'bubble_lr'}",
+      message_type = "error"
+    )
+  }
+  if (
+    identical(plot_type_requested, "pathway_bubble") &&
+      is.null(signaling) &&
+      identical(method, "CellChat")
+  ) {
+    info_pathway <- get_dataset_object(
+      srt = srt,
+      condition = condition,
+      dataset = dataset
+    )
+    signaling <- info_pathway$object@netP$pathways %||% NULL
+    signaling <- signaling[!is.na(signaling) & nzchar(signaling)]
+    if (
+      !is.null(signaling) &&
+        is.numeric(top_n) &&
+        length(top_n) == 1L &&
+        top_n > 0L
+    ) {
+      signaling <- utils::head(signaling, top_n)
+    }
+    if (is.null(signaling) || length(signaling) == 0L) {
+      log_message(
+        "{.arg signaling} is required when {.val plot_type = 'pathway_bubble'} and no pathways can be auto-selected",
+        message_type = "error"
+      )
+    }
+  }
+
+  if (plot_type %in% c("role_heatmap", "diff_heatmap")) {
+    if (!identical(method, "CellChat")) {
+      log_message(
+        paste0(
+          "{.arg plot_type} = {.val {plot_type}} is currently only supported ",
+          "for {.pkg CellChat} results"
+        ),
+        message_type = "error"
+      )
+    }
+    if (identical(plot_type, "role_heatmap")) {
+      return(finish_plot(ccc_cellchat_role_heatmap_plot(
+        srt = srt,
+        condition = condition,
+        dataset = dataset,
+        comparison = comparison,
+        signaling = signaling,
+        pattern = pattern,
+        top_anno = top_anno,
+        right_anno = right_anno,
+        left_anno = left_anno,
+        bottom_anno = bottom_anno,
+        bar_value = bar_value,
+        add_text = add_text,
+        cluster_rows = cluster_rows,
+        cluster_columns = cluster_columns,
+        show_row_names = show_row_names,
+        show_column_names = show_column_names,
+        x_text_angle = x_text_angle,
+        border = border,
+        width = width,
+        height = height,
+        units = units,
+        title = title,
+        subtitle = subtitle,
+        value_palette = palette_cfg$value_palette,
+        value_palcolor = palette_cfg$value_palcolor,
+        cell_palette = palette_cfg$cell_palette,
+        cell_palcolor = palette_cfg$cell_palcolor,
+        legend.position = legend.position,
+        legend.direction = legend.direction,
+        font.size = font.size,
+        theme_use = theme_use,
+        theme_args = theme_args
+      )))
+    }
+    return(finish_plot(ccc_cellchat_diff_heatmap_plot(
+      srt = srt,
+      condition = condition,
+      comparison = comparison,
+      signaling = signaling,
+      pattern = pattern,
+      top_anno = top_anno,
+      right_anno = right_anno,
+      left_anno = left_anno,
+      bottom_anno = bottom_anno,
+      bar_value = bar_value,
+      add_text = add_text,
+      cluster_rows = cluster_rows,
+      cluster_columns = cluster_columns,
+      show_row_names = show_row_names,
+      show_column_names = show_column_names,
+      x_text_angle = x_text_angle,
+      border = border,
+      width = width,
+      height = height,
+      units = units,
+      title = title,
+      subtitle = subtitle,
+      value_palette = palette_cfg$value_palette,
+      value_palcolor = palette_cfg$value_palcolor,
+      cell_palette = palette_cfg$cell_palette,
+      cell_palcolor = palette_cfg$cell_palcolor,
+      legend.position = legend.position,
+      legend.direction = legend.direction,
+      font.size = font.size,
+      theme_use = theme_use,
+      theme_args = theme_args
+    )))
+  }
+
+  if (identical(plot_type, "bubble") && identical(method, "CellChat")) {
+    explicit_lr_filter <- !is.null(pairLR.use) || !is.null(interaction.use)
+    bubble_top_n <- if (isTRUE(explicit_lr_filter)) NULL else top_n
+    if (use_cc_single_condition(srt, condition = condition)) {
+      cond1 <- resolve_single_cc_condition(srt, condition = condition)
+      obj1 <- get_single_cc_obj(srt, condition = cond1)
+      df_bubble <- prepare_cc_bubble_data(
+        object = obj1,
+        slot.name = slot.name,
+        signaling = signaling,
+        pairLR.use = pairLR.use,
+        sources.use = resolve_group_index_single(obj1, sender.use),
+        targets.use = resolve_group_index_single(obj1, receiver.use),
+        thresh = thresh,
+        dataset = NULL,
+        top_n = bubble_top_n,
+        remove.isolate = remove.isolate
+      )
+      df_bubble <- ccc_filter_bubble_df(
+        df = df_bubble,
+        interaction.use = interaction.use,
+        pairLR.use = pairLR.use
+      )
+      if (is.null(df_bubble) || nrow(df_bubble) == 0L) {
+        log_message(
+          "No communication records found under the current filtering conditions",
+          message_type = "error"
+        )
+      }
+      if (isTRUE(return.data)) {
+        return(df_bubble)
+      }
+      return(finish_plot(custom_cc_bubble_plot(
+        df = df_bubble,
+        title = title %||% cond1,
+        subtitle = subtitle,
+        xlab = NULL,
+        ylab = NULL,
+        color.by = bubble_color.by,
+        bubble_size.range = bubble_size.range,
+        palette = palette_cfg$value_palette,
+        palcolor = palette_cfg$value_palcolor,
+        font.size = font.size,
+        angle.x = angle.x,
+        hjust.x = hjust.x,
+        vjust.x = vjust.x,
+        legend.position = legend.position,
+        legend.direction = legend.direction,
+        theme_use = theme_use,
+        theme_args = theme_args,
+        aspect.ratio = aspect.ratio,
+        remove.isolate = remove.isolate
+      )))
+    }
+
+    cmp <- cc_get_cmp(srt = srt, condition = condition)
+    comp_idx <- cc_resolve_dataset_index(cmp, comparison = comparison)
+    obj.list <- cmp$object.list
+    df_list <- lapply(names(obj.list)[comp_idx], function(ds) {
+      obj <- obj.list[[ds]]
+      df_i <- prepare_cc_bubble_data(
+        object = obj,
+        slot.name = slot.name,
+        signaling = signaling,
+        pairLR.use = pairLR.use,
+        sources.use = resolve_group_index_single(obj, sender.use),
+        targets.use = resolve_group_index_single(obj, receiver.use),
+        thresh = thresh,
+        dataset = ds,
+        top_n = bubble_top_n,
+        remove.isolate = remove.isolate
+      )
+      df_i <- ccc_filter_bubble_df(
+        df = df_i,
+        interaction.use = interaction.use,
+        pairLR.use = pairLR.use
+      )
+      df_i
+    })
+    names(df_list) <- names(obj.list)[comp_idx]
+    if (isTRUE(return.data)) {
+      return(df_list)
+    }
+    df_list <- Filter(function(x) !is.null(x) && nrow(x) > 0L, df_list)
+    if (length(df_list) == 0L) {
+      log_message(
+        "No communication records found under the current filtering conditions",
+        message_type = "error"
+      )
+    }
+    df_bubble <- do.call(rbind, df_list)
+    return(finish_plot(custom_cc_bubble_plot(
+      df = df_bubble,
+      title = title %||% cmp_cc_label(cmp, comp_idx),
+      subtitle = subtitle,
+      xlab = NULL,
+      ylab = NULL,
+      color.by = bubble_color.by,
+      bubble_size.range = bubble_size.range,
+      palette = palette_cfg$value_palette,
+      palcolor = palette_cfg$value_palcolor,
+      font.size = font.size,
+      angle.x = angle.x,
+      hjust.x = hjust.x,
+      vjust.x = vjust.x,
+      legend.position = legend.position,
+      legend.direction = legend.direction,
+      theme_use = theme_use,
+      theme_args = theme_args,
+      aspect.ratio = aspect.ratio,
+      remove.isolate = remove.isolate
+    )))
+  }
+
+  if (identical(plot_type, "ligand_target")) {
+    ligand_method <- method
+    if (
+      !identical(method, "Nichenetr") && !identical(method, "MultiNichenetr")
+    ) {
+      available <- names(srt@tools)
+      if ("Nichenetr" %in% available) {
+        ligand_method <- "Nichenetr"
+      } else if ("MultiNichenetr" %in% available) {
+        ligand_method <- "MultiNichenetr"
+      } else {
+        log_message(
+          "Ligand-target plots require {.pkg NicheNet}/{.pkg MultiNicheNet} results. Run {.fn RunNichenetr} or {.fn RunMultiNichenetr} first.",
+          message_type = "error"
+        )
+      }
+    }
+    bundle <- get_bundle(srt, method = ligand_method)
+    ligand_target_df <- bundle$ligand_target_df %||% data.frame()
+    return(finish_plot(ccc_ligand_target_heatmap(
+      df = ligand_target_df,
+      top_n = top_n,
+      sender.use = sender.use,
+      receiver.use = receiver.use,
+      context_df = bundle$long_table %||% data.frame(),
+      sender_default = bundle$parameters$sender_celltypes %||%
+        bundle$parameters$sender_use %||%
+        NULL,
+      receiver_default = bundle$parameters$receiver_celltypes %||%
+        bundle$parameters$receiver %||%
+        NULL,
+      top_anno = top_anno,
+      right_anno = right_anno,
+      left_anno = left_anno,
+      bottom_anno = bottom_anno,
+      bar_value = bar_value,
+      add_text = add_text,
+      cluster_rows = cluster_rows,
+      cluster_columns = cluster_columns,
+      show_row_names = show_row_names,
+      show_column_names = show_column_names,
+      x_text_angle = x_text_angle,
+      border = border,
+      width = width,
+      height = height,
+      units = units,
+      title = title,
+      subtitle = subtitle,
+      value_palette = palette_cfg$value_palette,
+      value_palcolor = palette_cfg$value_palcolor,
+      cell_palette = palette_cfg$cell_palette,
+      cell_palcolor = palette_cfg$cell_palcolor,
+      legend.position = legend.position,
+      legend.direction = legend.direction,
+      font.size = font.size,
+      theme_use = theme_use,
+      theme_args = theme_args
+    )))
+  }
+
+  df <- ccc_long_table_for_method(
+    srt = srt,
+    method = method,
+    condition = condition,
+    dataset = dataset,
+    slot.name = slot.name,
+    signaling = signaling,
+    pairLR.use = pairLR.use,
+    sources.use = sender.use,
+    targets.use = receiver.use,
+    thresh = thresh
+  )
+
+  df <- standardize_long_df(df)
+  if (
+    identical(plot_type_requested, "pathway_bubble") &&
+      is.null(signaling)
+  ) {
+    pathway_score_df <- ccc_assign_plot_score(df = df, value = value)
+    pathway_score_df <- ccc_mark_significance(pathway_score_df, thresh = thresh)
+    pathway <- as.character(pathway_score_df$pathway_name)
+    pathway[is.na(pathway) | !nzchar(pathway)] <- "Unclassified"
+    score <- suppressWarnings(as.numeric(pathway_score_df$score))
+    score[!is.finite(score)] <- 0
+    pathway_rank <- sort(tapply(score, pathway, sum, na.rm = TRUE), decreasing = TRUE)
+    signaling <- names(pathway_rank)
+    if (
+      is.numeric(top_n) &&
+        length(top_n) == 1L &&
+        top_n > 0L
+    ) {
+      signaling <- utils::head(signaling, top_n)
+    }
+    signaling <- signaling[!is.na(signaling) & nzchar(signaling)]
+    if (length(signaling) == 0L) {
+      log_message(
+        "{.arg signaling} is required when {.val plot_type = 'pathway_bubble'} and no pathways can be auto-selected",
+        message_type = "error"
+      )
+    }
+  }
+  df <- filter_long_df(
+    df = df,
+    sender.use = sender.use,
+    receiver.use = receiver.use,
+    ligand.use = ligand.use,
+    receptor.use = receptor.use,
+    interaction.use = interaction.use,
+    signaling = signaling,
+    pairLR.use = pairLR.use
+  )
+
+  score_col <- value
+  if (!score_col %in% colnames(df)) {
+    score_col <- c("score", "prob", "means")[
+      c("score", "prob", "means") %in% colnames(df)
+    ][1]
+  }
+  if (is.null(score_col) || is.na(score_col)) {
+    score_col <- "score"
+    if (!"score" %in% colnames(df)) df$score <- NA_real_
+  }
+  if (!"pvalue" %in% colnames(df)) {
+    df$pvalue <- if ("pval" %in% colnames(df)) df$pval else NA_real_
+  }
+  df$score <- df[[score_col]]
+  if (
+    identical(plot_type_requested, "focused_heatmap") &&
+      is.numeric(min_interaction_threshold) &&
+      length(min_interaction_threshold) == 1L &&
+      is.finite(min_interaction_threshold) &&
+      min_interaction_threshold > 0
+  ) {
+    score_num <- suppressWarnings(as.numeric(df$score))
+    df <- df[
+      is.finite(score_num) & score_num >= min_interaction_threshold, ,
+      drop = FALSE
+    ]
+    if (nrow(df) == 0L) {
+      log_message(
+        "No communication records remain after applying {.arg min_interaction_threshold}",
+        message_type = "error"
+      )
+    }
+  }
+  df <- ccc_mark_significance(df, thresh = thresh)
+  df <- prepare_plot_df(df)
+
+  pair_df <- pair_plot_df(df)
+  interaction_df <- interaction_plot_df(df)
+
+  if (identical(plot_type, "dot")) {
+    return(finish_plot(ccc_source_target_dot_plot(
+      interaction_df = interaction_df,
+      top_n = top_n,
+      color.by = color.by,
+      interaction.use = interaction.use,
+      pairLR.use = pairLR.use,
+      ncols = ncols,
+      nrows = nrows,
+      title = title,
+      subtitle = subtitle,
+      value_palette = palette_cfg$value_palette,
+      value_palcolor = palette_cfg$value_palcolor,
+      legend.position = legend.position,
+      legend.direction = legend.direction,
+      font.size = font.size,
+      theme_use = theme_use,
+      theme_args = theme_args
+    )))
+  }
+
+  if (identical(plot_type, "tile")) {
+    return(finish_plot(ccc_source_target_tile_plot(
+      interaction_df = interaction_df,
+      top_n = top_n,
+      color.by = color.by,
+      interaction.use = interaction.use,
+      pairLR.use = pairLR.use,
+      title = title,
+      subtitle = subtitle,
+      value_palette = palette_cfg$value_palette,
+      value_palcolor = palette_cfg$value_palcolor,
+      legend.position = legend.position,
+      legend.direction = legend.direction,
+      font.size = font.size,
+      theme_use = theme_use,
+      theme_args = theme_args
+    )))
+  }
+
+  if (identical(plot_type, "sample_dot")) {
+    return(finish_plot(ccc_sample_dot_plot(
+      df = df,
+      sample_key = sample_key,
+      top_n = top_n,
+      top_n_pairs = top_n_pairs,
+      color.by = color.by,
+      interaction.use = interaction.use,
+      pairLR.use = pairLR.use,
+      ncols = ncols,
+      nrows = nrows,
+      title = title,
+      subtitle = subtitle,
+      value_palette = palette_cfg$value_palette,
+      value_palcolor = palette_cfg$value_palcolor,
+      legend.position = legend.position,
+      legend.direction = legend.direction,
+      font.size = font.size,
+      theme_use = theme_use,
+      theme_args = theme_args
+    )))
+  }
+
+  add_dot_eff <- identical(plot_type, "bubble")
+  value_use <- value
+  if (!isTRUE(value_supplied) && isTRUE(edge_value_supplied)) {
+    value_use <- edge_value
+  }
+
+  finish_plot(ccc_heatmap_full_plot(
+    df = df,
+    pair_df = pair_df,
+    interaction_df = interaction_df,
+    display_by = display_by,
+    top_n = top_n,
+    top_n_pairs = top_n_pairs,
+    add_dot = add_dot_eff,
+    top_anno = top_anno,
+    right_anno = right_anno,
+    left_anno = left_anno,
+    bottom_anno = bottom_anno,
+    value = value_use,
+    bar_value = bar_value,
+    add_text = add_text,
+    cluster_rows = cluster_rows,
+    cluster_columns = cluster_columns,
+    edge_value = edge_value,
+    color.by = color.by,
+    x_text_angle = x_text_angle,
+    facet_by = facet_by,
+    show_row_names = show_row_names,
+    show_column_names = show_column_names,
+    title = title,
+    subtitle = subtitle,
+    width = width,
+    height = height,
+    units = units,
+    border = border,
+    value_palette = palette_cfg$value_palette,
+    value_palcolor = palette_cfg$value_palcolor,
+    cell_palette = palette_cfg$cell_palette,
+    cell_palcolor = palette_cfg$cell_palcolor,
+    legend.position = legend.position,
+    legend.direction = legend.direction,
+    font.size = font.size,
+    theme_use = theme_use,
+    theme_args = theme_args
+  ))
+}
+
+ccc_heatmap_full_plot <- function(
+  df,
+  pair_df,
+  interaction_df,
+  display_by = "aggregation",
+  top_n = 20,
+  top_n_pairs = NULL,
+  add_dot = FALSE,
+  top_anno = "bar",
+  right_anno = "cell",
+  left_anno = "bar",
+  bottom_anno = "cell",
+  value = "sum",
+  bar_value = "sum",
+  add_text = NULL,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  edge_value = "sum",
+  color.by = "score",
+  x_text_angle = 90,
+  facet_by = NULL,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  title = NULL,
+  subtitle = NULL,
+  width = NULL,
+  height = NULL,
+  units = "inch",
+  border = TRUE,
+  value_palette = "RdBu",
+  value_palcolor = NULL,
+  cell_palette = "Chinese",
+  cell_palcolor = NULL,
+  legend.position = "right",
+  legend.direction = "vertical",
+  font.size = 10,
+  theme_use = "theme_scop",
+  theme_args = list()
+) {
+  check_r("circlize", verbose = FALSE)
+  bar_value <- ccc_match_bar_value(bar_value)
+  top_anno <- ccc_match_side_anno(top_anno)
+  right_anno <- ccc_match_side_anno(right_anno)
+  left_anno <- ccc_match_side_anno(left_anno)
+  bottom_anno <- ccc_match_side_anno(bottom_anno)
+
+  if (identical(display_by, "interaction")) {
+    plot_value <- ccc_heatmap_value_spec(
+      df = interaction_df,
+      color.by = color.by,
+      value = value
+    )
+    plot_df <- top_interactions(
+      interaction_df,
+      top_n = top_n,
+      value_col = plot_value$var
+    )
+    if (is.null(plot_df) || nrow(plot_df) == 0L) {
+      log_message(
+        "No interaction-level CCC records are available for heatmap plotting",
+        message_type = "error"
+      )
+    }
+
+    score_var <- plot_value$var
+    val_label <- plot_value$label
+    row_var <- "interaction_label"
+    row_title_str <- "Interaction"
+    if (is.null(facet_by)) {
+      col_var <- "pair"
+      col_title_str <- "Sender -> Receiver"
+    } else if (identical(facet_by, "sender")) {
+      plot_pairs <- unique(plot_df[, c("sender", "receiver", "pair"), drop = FALSE])
+      plot_pairs <- plot_pairs[order(plot_pairs$sender, plot_pairs$receiver), , drop = FALSE]
+      plot_df$plot_pair <- factor(plot_df$pair, levels = unique(plot_pairs$pair))
+      col_var <- "plot_pair"
+      col_title_str <- "Sender -> Receiver"
+    } else if (identical(facet_by, "receiver")) {
+      plot_pairs <- unique(plot_df[, c("receiver", "sender", "pair"), drop = FALSE])
+      plot_pairs <- plot_pairs[order(plot_pairs$receiver, plot_pairs$sender), , drop = FALSE]
+      plot_df$plot_pair <- factor(plot_df$pair, levels = unique(plot_pairs$pair))
+      col_var <- "plot_pair"
+      col_title_str <- "Sender -> Receiver"
+    } else {
+      log_message(
+        "{.arg facet_by} must be one of {.val sender}, {.val receiver}, or NULL",
+        message_type = "error"
+      )
+    }
+
+    interaction_order <- unique(as.character(plot_df$interaction_label))
+    interaction_order <- interaction_order[!is.na(interaction_order) & nzchar(interaction_order)]
+    plot_df$interaction_label <- factor(plot_df$interaction_label, levels = interaction_order)
+    if (
+      !is.null(top_n_pairs) &&
+        is.numeric(top_n_pairs) &&
+        length(top_n_pairs) == 1L &&
+        is.finite(top_n_pairs) &&
+        top_n_pairs > 0L
+    ) {
+      pair_scores <- sort(
+        tapply(
+          suppressWarnings(as.numeric(plot_df[[score_var]])),
+          as.character(plot_df[[col_var]]),
+          sum,
+          na.rm = TRUE
+        ),
+        decreasing = TRUE
+      )
+      keep_pairs <- names(pair_scores)[seq_len(min(as.integer(top_n_pairs), length(pair_scores)))]
+      if (is.factor(plot_df[[col_var]])) {
+        keep_pairs <- levels(plot_df[[col_var]])[levels(plot_df[[col_var]]) %in% keep_pairs]
+      }
+      plot_df <- plot_df[as.character(plot_df[[col_var]]) %in% keep_pairs, , drop = FALSE]
+      if (nrow(plot_df) == 0L) {
+        log_message(
+          "No interaction-level CCC records remain after {.arg top_n_pairs} filtering",
+          message_type = "error"
+        )
+      }
+      if (is.factor(plot_df[[col_var]])) {
+        plot_df[[col_var]] <- factor(as.character(plot_df[[col_var]]), levels = keep_pairs)
+      }
+    }
+
+    mat <- ccc_pivot_matrix(
+      df = plot_df,
+      row_var = row_var,
+      col_var = col_var,
+      val_var = score_var
+    )
+
+    add_text_eff <- if (is.null(add_text)) FALSE else isTRUE(add_text)
+
+    if (ccc_side_has_bar(top_anno, bottom_anno)) {
+      top_bar_vec <- ccc_collect_bar_stats(
+        values = plot_df[[score_var]],
+        groups = plot_df[[col_var]],
+        ordered_levels = colnames(mat),
+        metrics = bar_value
+      )
+    } else {
+      top_bar_vec <- NULL
+    }
+    if (ccc_side_has_distribution(top_anno, bottom_anno)) {
+      top_box_vec <- ccc_collect_group_values(
+        values = plot_df[[score_var]],
+        groups = plot_df[[col_var]],
+        ordered_levels = colnames(mat)
+      )
+    } else {
+      top_box_vec <- NULL
+    }
+    if (ccc_side_has_summary(top_anno, bottom_anno)) {
+      top_summary_vec <- ccc_collect_group_summary(
+        values = plot_df[[score_var]],
+        groups = plot_df[[col_var]],
+        ordered_levels = colnames(mat),
+        metric = "mean"
+      )
+    } else {
+      top_summary_vec <- NULL
+    }
+
+    if (ccc_side_has_bar(left_anno, right_anno)) {
+      right_bar_vec <- ccc_collect_bar_stats(
+        values = plot_df[[score_var]],
+        groups = plot_df[[row_var]],
+        ordered_levels = rownames(mat),
+        metrics = bar_value
+      )
+    } else {
+      right_bar_vec <- NULL
+    }
+    if (ccc_side_has_distribution(left_anno, right_anno)) {
+      right_box_vec <- ccc_collect_group_values(
+        values = plot_df[[score_var]],
+        groups = plot_df[[row_var]],
+        ordered_levels = rownames(mat)
+      )
+    } else {
+      right_box_vec <- NULL
+    }
+    if (ccc_side_has_summary(left_anno, right_anno)) {
+      right_summary_vec <- ccc_collect_group_summary(
+        values = plot_df[[score_var]],
+        groups = plot_df[[row_var]],
+        ordered_levels = rownames(mat),
+        metric = "mean"
+      )
+    } else {
+      right_summary_vec <- NULL
+    }
+  } else {
+    plot_value <- ccc_heatmap_value_spec(
+      df = pair_df,
+      color.by = color.by,
+      value = value %||% edge_value
+    )
+    plot_df <- top_pairs(
+      pair_df,
+      top_n = top_n,
+      value_col = plot_value$var
+    )
+    if (is.null(plot_df) || nrow(plot_df) == 0L) {
+      log_message(
+        "No aggregated sender-receiver interactions are available for heatmap plotting",
+        message_type = "error"
+      )
+    }
+
+    score_var <- plot_value$var
+    val_label <- plot_value$label
+
+    mat <- ccc_pivot_matrix(
+      df = plot_df,
+      row_var = "receiver",
+      col_var = "sender",
+      val_var = score_var
+    )
+
+    add_text_eff <- if (is.null(add_text)) TRUE else isTRUE(add_text)
+
+    row_title_str <- "Receiver"
+    col_title_str <- "Sender"
+
+    if (ccc_side_has_bar(top_anno, bottom_anno)) {
+      top_bar_vec <- ccc_collect_bar_stats(
+        values = plot_df[[score_var]],
+        groups = plot_df$sender,
+        ordered_levels = colnames(mat),
+        metrics = bar_value
+      )
+    } else {
+      top_bar_vec <- NULL
+    }
+    if (ccc_side_has_distribution(top_anno, bottom_anno)) {
+      top_box_vec <- ccc_collect_group_values(
+        values = plot_df[[score_var]],
+        groups = plot_df$sender,
+        ordered_levels = colnames(mat)
+      )
+    } else {
+      top_box_vec <- NULL
+    }
+    if (ccc_side_has_summary(top_anno, bottom_anno)) {
+      top_summary_vec <- ccc_collect_group_summary(
+        values = plot_df[[score_var]],
+        groups = plot_df$sender,
+        ordered_levels = colnames(mat),
+        metric = "mean"
+      )
+    } else {
+      top_summary_vec <- NULL
+    }
+
+    if (ccc_side_has_bar(left_anno, right_anno)) {
+      right_bar_vec <- ccc_collect_bar_stats(
+        values = plot_df[[score_var]],
+        groups = plot_df$receiver,
+        ordered_levels = rownames(mat),
+        metrics = bar_value
+      )
+    } else {
+      right_bar_vec <- NULL
+    }
+    if (ccc_side_has_distribution(left_anno, right_anno)) {
+      right_box_vec <- ccc_collect_group_values(
+        values = plot_df[[score_var]],
+        groups = plot_df$receiver,
+        ordered_levels = rownames(mat)
+      )
+    } else {
+      right_box_vec <- NULL
+    }
+    if (ccc_side_has_summary(left_anno, right_anno)) {
+      right_summary_vec <- ccc_collect_group_summary(
+        values = plot_df[[score_var]],
+        groups = plot_df$receiver,
+        ordered_levels = rownames(mat),
+        metric = "mean"
+      )
+    } else {
+      right_summary_vec <- NULL
+    }
+  }
+
+  mat_vals <- mat[is.finite(mat)]
+  if (length(mat_vals) == 0L) {
+    mat_vals <- c(0, 1)
+  }
+  val_range <- range(mat_vals, na.rm = TRUE)
+  if (val_range[1] == val_range[2]) {
+    val_range <- val_range + c(-0.5, 0.5)
+  }
+  fill_cols <- palette_colors(
+    palette = value_palette,
+    palcolor = value_palcolor,
+    n = 100
+  )
+  col_fun <- circlize::colorRamp2(
+    breaks = seq(val_range[1], val_range[2], length.out = length(fill_cols)),
+    colors = fill_cols
+  )
+
+  cell_fun <- if (isTRUE(add_text_eff) && !isTRUE(add_dot)) {
+    mat_local <- mat
+    function(j, i, x, y, width, height, fill) {
+      v <- mat_local[i, j]
+      if (is.finite(v)) {
+        grid::grid.text(
+          sprintf("%.2g", v),
+          x,
+          y,
+          gp = grid::gpar(
+            fontsize = font.size * 0.7,
+            col = if (!is.na(fill) && grDevices::col2rgb(fill)[1] < 128) {
+              "white"
+            } else {
+              "grey20"
+            }
+          )
+        )
+      }
+    }
+  } else {
+    NULL
+  }
+
+  if (isTRUE(add_dot)) {
+    mat_local <- mat
+    mat_finite <- mat_local[is.finite(mat_local)]
+    dot_max <- if (length(mat_finite) > 0) max(mat_finite) else 1
+    if (dot_max == 0) {
+      dot_max <- 1
+    }
+    layer_fun <- function(j, i, x, y, width, height, fill) {
+      v <- ComplexHeatmap::pindex(mat_local, i, j)
+      sz <- grid::unit(
+        ifelse(is.finite(v), pmax(v / dot_max, 0.05), 0) * 8,
+        "mm"
+      )
+      grid::grid.points(
+        x,
+        y,
+        pch = 21,
+        size = sz,
+        gp = grid::gpar(
+          fill = fill,
+          col = if (isTRUE(border)) "grey20" else NA,
+          lwd = 0.5
+        )
+      )
+    }
+    rect_gp <- grid::gpar(
+      col = if (isTRUE(border)) "grey85" else NA,
+      fill = NA,
+      lwd = 0.6
+    )
+  } else {
+    layer_fun <- NULL
+    rect_gp <- grid::gpar(
+      col = if (isTRUE(border)) "white" else NA,
+      lwd = 1
+    )
+  }
+
+  body_size <- ccc_heatmap_body_size(
+    nrow = nrow(mat),
+    ncol = ncol(mat),
+    width = width,
+    height = height,
+    units = units
+  )
+
+  col_ann <- if (!is.null(colnames(mat))) {
+    col_nms <- colnames(mat)
+    col_cols <- palette_colors(
+      col_nms,
+      palette = cell_palette,
+      palcolor = cell_palcolor
+    )
+    ComplexHeatmap::HeatmapAnnotation(
+      df = data.frame(Sender = col_nms, row.names = col_nms),
+      col = list(Sender = stats::setNames(col_cols, col_nms)),
+      annotation_name_gp = grid::gpar(fontsize = font.size * 0.8),
+      show_annotation_name = FALSE,
+      show_legend = FALSE,
+      which = "column",
+      border = border,
+      gp = grid::gpar(col = if (isTRUE(border)) "white" else NA)
+    )
+  } else {
+    NULL
+  }
+
+  row_ann <- if (!is.null(rownames(mat))) {
+    row_nms <- rownames(mat)
+    row_cols <- palette_colors(
+      row_nms,
+      palette = cell_palette,
+      palcolor = cell_palcolor
+    )
+    ComplexHeatmap::rowAnnotation(
+      df = data.frame(Receiver = row_nms, row.names = row_nms),
+      col = list(Receiver = stats::setNames(row_cols, row_nms)),
+      annotation_name_gp = grid::gpar(fontsize = font.size * 0.8),
+      show_annotation_name = FALSE,
+      show_legend = FALSE,
+      border = border,
+      gp = grid::gpar(col = if (isTRUE(border)) "white" else NA)
+    )
+  } else {
+    NULL
+  }
+
+  top_names <- colnames(mat)
+  right_names <- rownames(mat)
+
+  top_cols <- if (!is.null(top_names)) {
+    palette_colors(
+      top_names,
+      palette = cell_palette,
+      palcolor = cell_palcolor
+    )
+  } else {
+    NULL
+  }
+  right_cols <- if (!is.null(right_names)) {
+    palette_colors(
+      right_names,
+      palette = cell_palette,
+      palcolor = cell_palcolor
+    )
+  } else {
+    NULL
+  }
+
+  top_bar_ann <- ccc_build_bar_annotation(
+    stats_list = top_bar_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    reverse = FALSE
+  )
+  left_bar_ann <- ccc_build_bar_annotation(
+    stats_list = right_bar_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    reverse = TRUE
+  )
+  right_bar_ann <- ccc_build_bar_annotation(
+    stats_list = right_bar_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    reverse = FALSE
+  )
+
+  top_box_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "box",
+    reverse = FALSE
+  )
+  left_box_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "box",
+    reverse = TRUE
+  )
+  right_box_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "box",
+    reverse = FALSE
+  )
+  top_hist_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "histogram",
+    reverse = FALSE
+  )
+  left_hist_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "histogram",
+    reverse = TRUE
+  )
+  right_hist_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "histogram",
+    reverse = FALSE
+  )
+  top_density_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "density",
+    reverse = FALSE
+  )
+  left_density_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "density",
+    reverse = TRUE
+  )
+  right_density_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "density",
+    reverse = FALSE
+  )
+  top_violin_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "violin",
+    reverse = FALSE
+  )
+  left_violin_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "violin",
+    reverse = TRUE
+  )
+  right_violin_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "violin",
+    reverse = FALSE
+  )
+  top_point_ann <- ccc_build_summary_annotation(
+    values = top_summary_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "point",
+    reverse = FALSE
+  )
+  left_point_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "point",
+    reverse = TRUE
+  )
+  right_point_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "point",
+    reverse = FALSE
+  )
+  top_line_ann <- ccc_build_summary_annotation(
+    values = top_summary_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "line",
+    reverse = FALSE
+  )
+  left_line_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "line",
+    reverse = TRUE
+  )
+  right_line_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "line",
+    reverse = FALSE
+  )
+
+  top_combined <- ccc_combine_side_annotations(
+    side_anno = top_anno,
+    annotations = list(
+      bar = top_bar_ann,
+      box = top_box_ann,
+      point = top_point_ann,
+      line = top_line_ann,
+      histogram = top_hist_ann,
+      density = top_density_ann,
+      violin = top_violin_ann,
+      cell = col_ann
+    )
+  )
+  bottom_combined <- ccc_combine_side_annotations(
+    side_anno = bottom_anno,
+    annotations = list(
+      bar = top_bar_ann,
+      box = top_box_ann,
+      point = top_point_ann,
+      line = top_line_ann,
+      histogram = top_hist_ann,
+      density = top_density_ann,
+      violin = top_violin_ann,
+      cell = col_ann
+    )
+  )
+  left_combined <- ccc_combine_side_annotations(
+    side_anno = left_anno,
+    annotations = list(
+      bar = left_bar_ann,
+      box = left_box_ann,
+      point = left_point_ann,
+      line = left_line_ann,
+      histogram = left_hist_ann,
+      density = left_density_ann,
+      violin = left_violin_ann,
+      cell = row_ann
+    )
+  )
+  right_combined <- ccc_combine_side_annotations(
+    side_anno = right_anno,
+    annotations = list(
+      bar = right_bar_ann,
+      box = right_box_ann,
+      point = right_point_ann,
+      line = right_line_ann,
+      histogram = right_hist_ann,
+      density = right_density_ann,
+      violin = right_violin_ann,
+      cell = row_ann
+    )
+  )
+
+  ht_args <- list(
+    matrix = mat,
+    col = col_fun,
+    name = val_label,
+    cell_fun = cell_fun,
+    layer_fun = layer_fun,
+    top_annotation = top_combined,
+    bottom_annotation = bottom_combined,
+    left_annotation = left_combined,
+    right_annotation = right_combined,
+    row_title = row_title_str,
+    column_title = col_title_str,
+    row_title_gp = grid::gpar(fontsize = font.size),
+    column_title_gp = grid::gpar(fontsize = font.size),
+    show_row_names = show_row_names,
+    show_column_names = show_column_names,
+    cluster_rows = cluster_rows,
+    cluster_columns = cluster_columns,
+    row_names_gp = grid::gpar(fontsize = font.size),
+    column_names_gp = grid::gpar(fontsize = font.size),
+    column_names_rot = x_text_angle,
+    border = border,
+    rect_gp = rect_gp,
+    use_raster = FALSE,
+    width = body_size$width,
+    height = body_size$height,
+    heatmap_legend_param = list(
+      title_gp = grid::gpar(fontsize = font.size * 0.9, fontface = "bold"),
+      labels_gp = grid::gpar(fontsize = font.size * 0.8),
+      border = "black",
+      grid_width = grid::unit(4, "mm")
+    )
+  )
+
+  ht <- do.call(ComplexHeatmap::Heatmap, ht_args)
+
+  g_tree <- grid::grid.grabExpr(
+    ComplexHeatmap::draw(
+      ht,
+      padding = grid::unit(c(4, 4, 12, 4), "mm")
+    ),
+    wrap = TRUE,
+    wrap.grobs = TRUE
+  )
+
+  if (isTRUE(body_size$fixed)) {
+    overall_size <- ccc_heatmap_capture_size(
+      body_width = body_size$width_num,
+      body_height = body_size$height_num,
+      top_tracks = ccc_count_side_tracks(
+        top_anno,
+        track_counts = list(
+          bar = if (is.null(top_bar_vec)) 0L else length(top_bar_vec),
+          box = if (is.null(top_box_vec)) 0L else 1L,
+          point = if (is.null(top_summary_vec)) 0L else 1L,
+          line = if (is.null(top_summary_vec)) 0L else 1L,
+          histogram = if (is.null(top_box_vec)) 0L else 1L,
+          density = if (is.null(top_box_vec)) 0L else 1L,
+          violin = if (is.null(top_box_vec)) 0L else 1L,
+          cell = if (is.null(col_ann)) 0L else 1L
+        )
+      ),
+      bottom_tracks = ccc_count_side_tracks(
+        bottom_anno,
+        track_counts = list(
+          bar = if (is.null(top_bar_vec)) 0L else length(top_bar_vec),
+          box = if (is.null(top_box_vec)) 0L else 1L,
+          point = if (is.null(top_summary_vec)) 0L else 1L,
+          line = if (is.null(top_summary_vec)) 0L else 1L,
+          histogram = if (is.null(top_box_vec)) 0L else 1L,
+          density = if (is.null(top_box_vec)) 0L else 1L,
+          violin = if (is.null(top_box_vec)) 0L else 1L,
+          cell = if (is.null(col_ann)) 0L else 1L
+        )
+      ),
+      left_tracks = ccc_count_side_tracks(
+        left_anno,
+        track_counts = list(
+          bar = if (is.null(right_bar_vec)) 0L else length(right_bar_vec),
+          box = if (is.null(right_box_vec)) 0L else 1L,
+          point = if (is.null(right_summary_vec)) 0L else 1L,
+          line = if (is.null(right_summary_vec)) 0L else 1L,
+          histogram = if (is.null(right_box_vec)) 0L else 1L,
+          density = if (is.null(right_box_vec)) 0L else 1L,
+          violin = if (is.null(right_box_vec)) 0L else 1L,
+          cell = if (is.null(row_ann)) 0L else 1L
+        )
+      ),
+      right_tracks = ccc_count_side_tracks(
+        right_anno,
+        track_counts = list(
+          bar = if (is.null(right_bar_vec)) 0L else length(right_bar_vec),
+          box = if (is.null(right_box_vec)) 0L else 1L,
+          point = if (is.null(right_summary_vec)) 0L else 1L,
+          line = if (is.null(right_summary_vec)) 0L else 1L,
+          histogram = if (is.null(right_box_vec)) 0L else 1L,
+          density = if (is.null(right_box_vec)) 0L else 1L,
+          violin = if (is.null(right_box_vec)) 0L else 1L,
+          cell = if (is.null(row_ann)) 0L else 1L
+        )
+      ),
+      legend.position = legend.position,
+      has_title = !is.null(title) || !is.null(subtitle)
+    )
+    p <- panel_fix_overall(
+      g_tree,
+      width = overall_size$width,
+      height = overall_size$height,
+      units = units
+    )
+  } else {
+    p <- patchwork::wrap_plots(g_tree)
+  }
+
+  if (!is.null(title) || !is.null(subtitle)) {
+    p <- p +
+      ggplot2::labs(title = title, subtitle = subtitle) +
+      apply_plot_theme(theme_use, theme_args) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(size = font.size * 1.2, hjust = 0.5),
+        plot.subtitle = ggplot2::element_text(size = font.size, hjust = 0.5)
+      )
+  }
+
+  p
+}
+
+ccc_ligand_target_heatmap <- function(
+  df,
+  top_n = 20,
+  sender.use = NULL,
+  receiver.use = NULL,
+  context_df = NULL,
+  sender_default = NULL,
+  receiver_default = NULL,
+  top_anno = "bar",
+  right_anno = "cell",
+  left_anno = "bar",
+  bottom_anno = "cell",
+  bar_value = "sum",
+  add_text = NULL,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  x_text_angle = 90,
+  border = TRUE,
+  width = NULL,
+  height = NULL,
+  units = "inch",
+  title = NULL,
+  subtitle = NULL,
+  value_palette = "RdBu",
+  value_palcolor = NULL,
+  cell_palette = "Chinese",
+  cell_palcolor = NULL,
+  legend.position = "right",
+  legend.direction = "vertical",
+  font.size = 10,
+  theme_use = "theme_scop",
+  theme_args = list()
+) {
+  check_r("circlize", verbose = FALSE)
+  bar_value <- ccc_match_bar_value(bar_value)
+  top_anno <- ccc_match_side_anno(top_anno)
+  right_anno <- ccc_match_side_anno(right_anno)
+  left_anno <- ccc_match_side_anno(left_anno)
+  bottom_anno <- ccc_match_side_anno(bottom_anno)
+
+  plot_df <- ccc_standardize_ligand_target_df(
+    df = df,
+    top_n = top_n,
+    sender.use = sender.use,
+    receiver.use = receiver.use,
+    context_df = context_df,
+    sender_default = sender_default,
+    receiver_default = receiver_default
+  )
+  plot_df <- plot_df[is.finite(plot_df$weight), , drop = FALSE]
+  if (nrow(plot_df) == 0L) {
+    log_message(
+      "No finite ligand-target weights are available for heatmap plotting",
+      message_type = "error"
+    )
+  }
+
+  ligand_levels <- levels(plot_df$ligand) %||%
+    unique(as.character(plot_df$ligand))
+  target_levels <- levels(plot_df$target) %||%
+    unique(as.character(plot_df$target))
+  mat <- ccc_ligand_target_matrix(
+    plot_df = plot_df,
+    ligand_levels = ligand_levels,
+    target_levels = target_levels
+  )
+
+  add_text_eff <- if (is.null(add_text)) TRUE else isTRUE(add_text)
+  top_bar_vec <- if (ccc_side_has_bar(top_anno, bottom_anno)) {
+    ccc_collect_bar_stats(
+      values = plot_df$weight,
+      groups = plot_df$target,
+      ordered_levels = colnames(mat),
+      metrics = bar_value
+    )
+  } else {
+    NULL
+  }
+  top_box_vec <- if (ccc_side_has_distribution(top_anno, bottom_anno)) {
+    ccc_collect_group_values(
+      values = plot_df$weight,
+      groups = plot_df$target,
+      ordered_levels = colnames(mat)
+    )
+  } else {
+    NULL
+  }
+  top_summary_vec <- if (ccc_side_has_summary(top_anno, bottom_anno)) {
+    ccc_collect_group_summary(
+      values = plot_df$weight,
+      groups = plot_df$target,
+      ordered_levels = colnames(mat),
+      metric = "mean"
+    )
+  } else {
+    NULL
+  }
+  right_bar_vec <- if (ccc_side_has_bar(left_anno, right_anno)) {
+    ccc_collect_bar_stats(
+      values = plot_df$weight,
+      groups = plot_df$ligand,
+      ordered_levels = rownames(mat),
+      metrics = bar_value
+    )
+  } else {
+    NULL
+  }
+  right_box_vec <- if (ccc_side_has_distribution(left_anno, right_anno)) {
+    ccc_collect_group_values(
+      values = plot_df$weight,
+      groups = plot_df$ligand,
+      ordered_levels = rownames(mat)
+    )
+  } else {
+    NULL
+  }
+  right_summary_vec <- if (ccc_side_has_summary(left_anno, right_anno)) {
+    ccc_collect_group_summary(
+      values = plot_df$weight,
+      groups = plot_df$ligand,
+      ordered_levels = rownames(mat),
+      metric = "mean"
+    )
+  } else {
+    NULL
+  }
+
+  mat_vals <- mat[is.finite(mat)]
+  if (length(mat_vals) == 0L) {
+    mat_vals <- c(0, 1)
+  }
+  val_range <- range(mat_vals, na.rm = TRUE)
+  if (val_range[1] == val_range[2]) {
+    val_range <- val_range + c(-0.5, 0.5)
+  }
+  fill_cols <- palette_colors(
+    palette = value_palette,
+    palcolor = value_palcolor,
+    n = 100
+  )
+  col_fun <- circlize::colorRamp2(
+    breaks = seq(val_range[1], val_range[2], length.out = length(fill_cols)),
+    colors = fill_cols
+  )
+
+  cell_fun <- if (isTRUE(add_text_eff)) {
+    mat_local <- mat
+    function(j, i, x, y, width, height, fill) {
+      v <- mat_local[i, j]
+      if (is.finite(v)) {
+        grid::grid.text(
+          sprintf("%.2g", v),
+          x,
+          y,
+          gp = grid::gpar(
+            fontsize = font.size * 0.7,
+            col = if (!is.na(fill) && grDevices::col2rgb(fill)[1] < 128) {
+              "white"
+            } else {
+              "grey20"
+            }
+          )
+        )
+      }
+    }
+  } else {
+    NULL
+  }
+
+  body_size <- ccc_heatmap_body_size(
+    nrow = nrow(mat),
+    ncol = ncol(mat),
+    width = width,
+    height = height,
+    units = units
+  )
+
+  col_ann <- if (!is.null(colnames(mat))) {
+    col_nms <- colnames(mat)
+    col_cols <- palette_colors(
+      col_nms,
+      palette = cell_palette,
+      palcolor = cell_palcolor
+    )
+    ComplexHeatmap::HeatmapAnnotation(
+      df = data.frame(Target = col_nms, row.names = col_nms),
+      col = list(Target = stats::setNames(col_cols, col_nms)),
+      annotation_name_gp = grid::gpar(fontsize = font.size * 0.8),
+      show_annotation_name = FALSE,
+      show_legend = FALSE,
+      which = "column",
+      border = border,
+      gp = grid::gpar(col = if (isTRUE(border)) "white" else NA)
+    )
+  } else {
+    NULL
+  }
+
+  row_ann <- if (!is.null(rownames(mat))) {
+    row_nms <- rownames(mat)
+    row_cols <- palette_colors(
+      row_nms,
+      palette = cell_palette,
+      palcolor = cell_palcolor
+    )
+    ComplexHeatmap::rowAnnotation(
+      df = data.frame(Ligand = row_nms, row.names = row_nms),
+      col = list(Ligand = stats::setNames(row_cols, row_nms)),
+      annotation_name_gp = grid::gpar(fontsize = font.size * 0.8),
+      show_annotation_name = FALSE,
+      show_legend = FALSE,
+      border = border,
+      gp = grid::gpar(col = if (isTRUE(border)) "white" else NA)
+    )
+  } else {
+    NULL
+  }
+
+  top_names <- colnames(mat)
+  right_names <- rownames(mat)
+  top_cols <- if (!is.null(top_names)) {
+    palette_colors(top_names, palette = cell_palette, palcolor = cell_palcolor)
+  } else {
+    NULL
+  }
+  right_cols <- if (!is.null(right_names)) {
+    palette_colors(
+      right_names,
+      palette = cell_palette,
+      palcolor = cell_palcolor
+    )
+  } else {
+    NULL
+  }
+
+  top_bar_ann <- ccc_build_bar_annotation(
+    stats_list = top_bar_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    reverse = FALSE
+  )
+  left_bar_ann <- ccc_build_bar_annotation(
+    stats_list = right_bar_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    reverse = TRUE
+  )
+  right_bar_ann <- ccc_build_bar_annotation(
+    stats_list = right_bar_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    reverse = FALSE
+  )
+  top_box_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "box",
+    reverse = FALSE
+  )
+  left_box_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "box",
+    reverse = TRUE
+  )
+  right_box_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "box",
+    reverse = FALSE
+  )
+  top_hist_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "histogram",
+    reverse = FALSE
+  )
+  left_hist_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "histogram",
+    reverse = TRUE
+  )
+  right_hist_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "histogram",
+    reverse = FALSE
+  )
+  top_density_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "density",
+    reverse = FALSE
+  )
+  left_density_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "density",
+    reverse = TRUE
+  )
+  right_density_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "density",
+    reverse = FALSE
+  )
+  top_violin_ann <- ccc_build_distribution_annotation(
+    values = top_box_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "violin",
+    reverse = FALSE
+  )
+  left_violin_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "violin",
+    reverse = TRUE
+  )
+  right_violin_ann <- ccc_build_distribution_annotation(
+    values = right_box_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "violin",
+    reverse = FALSE
+  )
+  top_point_ann <- ccc_build_summary_annotation(
+    values = top_summary_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "point",
+    reverse = FALSE
+  )
+  left_point_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "point",
+    reverse = TRUE
+  )
+  right_point_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "point",
+    reverse = FALSE
+  )
+  top_line_ann <- ccc_build_summary_annotation(
+    values = top_summary_vec,
+    fill_cols = top_cols,
+    which = "column",
+    font.size = font.size,
+    border = border,
+    type = "line",
+    reverse = FALSE
+  )
+  left_line_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "line",
+    reverse = TRUE
+  )
+  right_line_ann <- ccc_build_summary_annotation(
+    values = right_summary_vec,
+    fill_cols = right_cols,
+    which = "row",
+    font.size = font.size,
+    border = border,
+    type = "line",
+    reverse = FALSE
+  )
+
+  top_combined <- ccc_combine_side_annotations(
+    side_anno = top_anno,
+    annotations = list(
+      bar = top_bar_ann,
+      box = top_box_ann,
+      point = top_point_ann,
+      line = top_line_ann,
+      histogram = top_hist_ann,
+      density = top_density_ann,
+      violin = top_violin_ann,
+      cell = col_ann
+    )
+  )
+  bottom_combined <- ccc_combine_side_annotations(
+    side_anno = bottom_anno,
+    annotations = list(
+      bar = top_bar_ann,
+      box = top_box_ann,
+      point = top_point_ann,
+      line = top_line_ann,
+      histogram = top_hist_ann,
+      density = top_density_ann,
+      violin = top_violin_ann,
+      cell = col_ann
+    )
+  )
+  left_combined <- ccc_combine_side_annotations(
+    side_anno = left_anno,
+    annotations = list(
+      bar = left_bar_ann,
+      box = left_box_ann,
+      point = left_point_ann,
+      line = left_line_ann,
+      histogram = left_hist_ann,
+      density = left_density_ann,
+      violin = left_violin_ann,
+      cell = row_ann
+    )
+  )
+  right_combined <- ccc_combine_side_annotations(
+    side_anno = right_anno,
+    annotations = list(
+      bar = right_bar_ann,
+      box = right_box_ann,
+      point = right_point_ann,
+      line = right_line_ann,
+      histogram = right_hist_ann,
+      density = right_density_ann,
+      violin = right_violin_ann,
+      cell = row_ann
+    )
+  )
+
+  ht <- ComplexHeatmap::Heatmap(
+    matrix = mat,
+    col = col_fun,
+    name = "Weight",
+    cell_fun = cell_fun,
+    top_annotation = top_combined,
+    bottom_annotation = bottom_combined,
+    left_annotation = left_combined,
+    right_annotation = right_combined,
+    row_title = "Ligand",
+    column_title = "Target",
+    row_title_gp = grid::gpar(fontsize = font.size),
+    column_title_gp = grid::gpar(fontsize = font.size),
+    show_row_names = show_row_names,
+    show_column_names = show_column_names,
+    cluster_rows = cluster_rows,
+    cluster_columns = cluster_columns,
+    row_names_gp = grid::gpar(fontsize = font.size),
+    column_names_gp = grid::gpar(fontsize = font.size),
+    column_names_rot = x_text_angle,
+    border = border,
+    rect_gp = grid::gpar(
+      col = if (isTRUE(border)) "white" else NA,
+      lwd = 1
+    ),
+    use_raster = FALSE,
+    width = body_size$width,
+    height = body_size$height,
+    heatmap_legend_param = list(
+      title_gp = grid::gpar(fontsize = font.size * 0.9, fontface = "bold"),
+      labels_gp = grid::gpar(fontsize = font.size * 0.8),
+      border = "black",
+      grid_width = grid::unit(4, "mm")
+    )
+  )
+
+  g_tree <- grid::grid.grabExpr(
+    ComplexHeatmap::draw(
+      ht,
+      padding = grid::unit(c(4, 4, 12, 4), "mm")
+    ),
+    wrap = TRUE,
+    wrap.grobs = TRUE
+  )
+
+  if (isTRUE(body_size$fixed)) {
+    overall_size <- ccc_heatmap_capture_size(
+      body_width = body_size$width_num,
+      body_height = body_size$height_num,
+      top_tracks = ccc_count_side_tracks(
+        top_anno,
+        track_counts = list(
+          bar = if (is.null(top_bar_vec)) 0L else length(top_bar_vec),
+          box = if (is.null(top_box_vec)) 0L else 1L,
+          point = if (is.null(top_summary_vec)) 0L else 1L,
+          line = if (is.null(top_summary_vec)) 0L else 1L,
+          histogram = if (is.null(top_box_vec)) 0L else 1L,
+          density = if (is.null(top_box_vec)) 0L else 1L,
+          violin = if (is.null(top_box_vec)) 0L else 1L,
+          cell = if (is.null(col_ann)) 0L else 1L
+        )
+      ),
+      bottom_tracks = ccc_count_side_tracks(
+        bottom_anno,
+        track_counts = list(
+          bar = if (is.null(top_bar_vec)) 0L else length(top_bar_vec),
+          box = if (is.null(top_box_vec)) 0L else 1L,
+          point = if (is.null(top_summary_vec)) 0L else 1L,
+          line = if (is.null(top_summary_vec)) 0L else 1L,
+          histogram = if (is.null(top_box_vec)) 0L else 1L,
+          density = if (is.null(top_box_vec)) 0L else 1L,
+          violin = if (is.null(top_box_vec)) 0L else 1L,
+          cell = if (is.null(col_ann)) 0L else 1L
+        )
+      ),
+      left_tracks = ccc_count_side_tracks(
+        left_anno,
+        track_counts = list(
+          bar = if (is.null(right_bar_vec)) 0L else length(right_bar_vec),
+          box = if (is.null(right_box_vec)) 0L else 1L,
+          point = if (is.null(right_summary_vec)) 0L else 1L,
+          line = if (is.null(right_summary_vec)) 0L else 1L,
+          histogram = if (is.null(right_box_vec)) 0L else 1L,
+          density = if (is.null(right_box_vec)) 0L else 1L,
+          violin = if (is.null(right_box_vec)) 0L else 1L,
+          cell = if (is.null(row_ann)) 0L else 1L
+        )
+      ),
+      right_tracks = ccc_count_side_tracks(
+        right_anno,
+        track_counts = list(
+          bar = if (is.null(right_bar_vec)) 0L else length(right_bar_vec),
+          box = if (is.null(right_box_vec)) 0L else 1L,
+          point = if (is.null(right_summary_vec)) 0L else 1L,
+          line = if (is.null(right_summary_vec)) 0L else 1L,
+          histogram = if (is.null(right_box_vec)) 0L else 1L,
+          density = if (is.null(right_box_vec)) 0L else 1L,
+          violin = if (is.null(right_box_vec)) 0L else 1L,
+          cell = if (is.null(row_ann)) 0L else 1L
+        )
+      ),
+      legend.position = legend.position,
+      has_title = !is.null(title) || !is.null(subtitle)
+    )
+    p <- panel_fix_overall(
+      g_tree,
+      width = overall_size$width,
+      height = overall_size$height,
+      units = units
+    )
+  } else {
+    p <- patchwork::wrap_plots(g_tree)
+  }
+
+  if (!is.null(title) || !is.null(subtitle)) {
+    p <- p +
+      ggplot2::labs(title = title, subtitle = subtitle) +
+      apply_plot_theme(theme_use, theme_args) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(size = font.size * 1.2, hjust = 0.5),
+        plot.subtitle = ggplot2::element_text(size = font.size, hjust = 0.5)
+      )
+  }
+
+  p
+}
+
+
+ccc_cellchat_heatmap_comparison <- function(
+  srt,
+  condition = NULL,
+  comparison = c(1, 2),
+  min_n = 1L
+) {
+  cmp <- cc_get_cmp(srt = srt, condition = condition)
+  comp_idx <- cc_resolve_dataset_index(cmp, comparison = comparison)
+  if (length(comp_idx) < min_n) {
+    log_message(
+      paste0(
+        "{.arg comparison} must contain at least ",
+        min_n,
+        " datasets for CellChat comparison heatmap plotting"
+      ),
+      message_type = "error"
+    )
+  }
+  object_names <- names(cmp$object.list)[comp_idx]
+  object_list <- cmp$object.list[object_names]
+  list(
+    cmp = cmp,
+    comp_idx = comp_idx,
+    object_names = object_names,
+    object_list = object_list
+  )
+}
+
+
+prepare_cc_bubble_data <- function(
+  object,
+  slot.name = "net",
+  signaling = NULL,
+  pairLR.use = NULL,
+  sources.use = NULL,
+  targets.use = NULL,
+  thresh = 0.05,
+  dataset = NULL,
+  top_n = 10,
+  remove.isolate = TRUE
+) {
+  df <- subset_cc_table(
+    object = object,
+    slot.name = slot.name,
+    signaling = signaling,
+    pairLR.use = pairLR.use,
+    sources.use = sources.use,
+    targets.use = targets.use,
+    thresh = thresh,
+    dataset = dataset
+  )
+  if (is.null(df) || nrow(df) == 0L) {
+    return(df)
+  }
+
+  if (isTRUE(remove.isolate)) {
+    df <- df[df$prob > 0, , drop = FALSE]
+  }
+  if (nrow(df) == 0L) {
+    return(df)
+  }
+
+  if (
+    !is.null(top_n) &&
+      is.numeric(top_n) &&
+      length(top_n) == 1L &&
+      top_n > 0L &&
+      is.null(pairLR.use)
+  ) {
+    if (length(unique(df$interaction_name)) > top_n) {
+      score_interaction <- sort(
+        tapply(df$prob, as.character(df$interaction_name), sum, na.rm = TRUE),
+        decreasing = TRUE
+      )
+      keep_interaction <- names(score_interaction)[seq_len(min(
+        top_n,
+        length(score_interaction)
+      ))]
+      df <- df[df$interaction_name %in% keep_interaction, , drop = FALSE]
+    }
+
+    max_pairs <- max(15L, as.integer(top_n) * 2L)
+    pair_vec <- paste(df$source, "->", df$target)
+    if (
+      length(unique(pair_vec)) > max_pairs &&
+        is.null(sources.use) &&
+        is.null(targets.use)
+    ) {
+      score_pair <- sort(
+        tapply(df$prob, pair_vec, sum, na.rm = TRUE),
+        decreasing = TRUE
+      )
+      keep_pair <- names(score_pair)[seq_len(min(
+        max_pairs,
+        length(score_pair)
+      ))]
+      df <- df[paste(df$source, "->", df$target) %in% keep_pair, , drop = FALSE]
+    }
+  }
+
+  df
+}
+
+custom_cc_bubble_plot <- function(
+  df,
+  title = NULL,
+  subtitle = NULL,
+  xlab = NULL,
+  ylab = NULL,
+  color.by = c("prob", "pval"),
+  bubble_size.range = c(1.5, 8),
+  palette = "RdBu",
+  palcolor = NULL,
+  font.size = 10,
+  angle.x = 45,
+  hjust.x = 1,
+  vjust.x = 1,
+  legend.position = "right",
+  legend.direction = "vertical",
+  legend.title = NULL,
+  theme_use = "theme_scop",
+  theme_args = list(),
+  aspect.ratio = NULL,
+  remove.isolate = TRUE
+) {
+  color.by <- match.arg(color.by)
+  if (is.null(df) || nrow(df) == 0L) {
+    log_message(
+      "No communication records available for bubble plot",
+      message_type = "error"
+    )
+  }
+
+  req_cols <- c("source", "target", "interaction_name", "prob", "pval")
+  miss <- setdiff(req_cols, colnames(df))
+  if (length(miss) > 0L) {
+    log_message(
+      "Missing required columns for bubble plot: {.val {miss}}",
+      message_type = "error"
+    )
+  }
+
+  if (isTRUE(remove.isolate)) {
+    df <- df[df$prob > 0, , drop = FALSE]
+  }
+  if (nrow(df) == 0L) {
+    log_message(
+      "No non-zero communication records remain after filtering",
+      message_type = "error"
+    )
+  }
+
+  df$pair <- paste(df$source, "->", df$target)
+  if ("dataset" %in% colnames(df) && length(unique(df$dataset)) > 1L) {
+    df$pair <- paste0(df$pair, " [", df$dataset, "]")
+  }
+  df$interaction_plot <- as.character(df$interaction_name)
+
+  pair_order <- sort(
+    tapply(df$prob, df$pair, sum, na.rm = TRUE),
+    decreasing = TRUE
+  )
+  interaction_order <- sort(
+    tapply(df$prob, df$interaction_plot, sum, na.rm = TRUE),
+    decreasing = TRUE
+  )
+  df$pair <- factor(df$pair, levels = names(pair_order))
+  df$interaction_plot <- factor(
+    df$interaction_plot,
+    levels = rev(names(interaction_order))
+  )
+
+  cols <- palette_colors(palette = palette, palcolor = palcolor, n = 9)
+  fill_var <- if (identical(color.by, "pval")) {
+    df$fill_val <- -log10(df$pval + 1e-300)
+    "fill_val"
+  } else {
+    df$fill_val <- df$prob
+    "fill_val"
+  }
+  fill_label <- legend.title %||%
+    if (identical(color.by, "pval")) "-log10(pval)" else "prob"
+
+  p <- ggplot2::ggplot(
+    df,
+    ggplot2::aes(
+      x = pair,
+      y = interaction_plot,
+      size = prob,
+      fill = .data[[fill_var]]
+    )
+  ) +
+    ggplot2::geom_point(shape = 21, color = "grey20", stroke = 0.2) +
+    ggplot2::scale_size_area(
+      name = "prob",
+      max_size = max(bubble_size.range),
+      n.breaks = 4,
+      guide = ggplot2::guide_legend(
+        override.aes = list(fill = "grey30", shape = 21, color = "grey20"),
+        order = 2
+      )
+    ) +
+    ggplot2::scale_fill_gradientn(
+      name = fill_label,
+      colours = cols,
+      n.breaks = 4,
+      guide = ggplot2::guide_colorbar(
+        frame.colour = "black",
+        ticks.colour = "black",
+        title.hjust = 0,
+        order = 1
+      )
+    ) +
+    ggplot2::labs(
+      x = xlab,
+      y = ylab,
+      title = title,
+      subtitle = subtitle
+    ) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(
+        angle = angle.x,
+        hjust = hjust.x,
+        vjust = vjust.x
+      ),
+      panel.grid.major = ggplot2::element_line(
+        linewidth = 0.3,
+        colour = "grey80",
+        linetype = 2
+      ),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+
+  finalize_cc_plot(
+    p,
+    title = title,
+    subtitle = subtitle,
+    xlab = xlab,
+    ylab = ylab,
+    legend.position = legend.position,
+    legend.direction = legend.direction,
+    legend.title = legend.title,
+    theme_use = theme_use,
+    theme_args = theme_args,
+    aspect.ratio = aspect.ratio,
+    font.size = font.size
+  )
+}
+
+ccc_identifier_key <- function(x) {
+  x <- ccc_clean_identifier(x, drop_receptor_suffix = FALSE)
+  x <- tolower(trimws(x))
+  x[x == "nan"] <- ""
+  gsub("[^[:alnum:]]+", "", x)
+}
+
+ccc_row_identifier_candidates <- function(df, columns = character(), include_lr = TRUE) {
+  if (is.null(df) || nrow(df) == 0L) {
+    return(list())
+  }
+  out <- list()
+  for (nm in intersect(columns, colnames(df))) {
+    out[[nm]] <- as.character(df[[nm]])
+  }
+  if (isTRUE(include_lr) && all(c("ligand", "receptor") %in% colnames(df))) {
+    ligand <- ccc_display_gene(df$ligand)
+    receptor <- ccc_display_gene(df$receptor)
+    out[["lr_dash"]] <- paste(ligand, receptor, sep = "-")
+    out[["lr_spaced"]] <- paste(ligand, receptor, sep = " - ")
+    out[["lr_arrow"]] <- paste(ligand, receptor, sep = " -> ")
+    out[["lr_underscore"]] <- paste(ligand, receptor, sep = "_")
+  }
+  out
+}
+
+ccc_match_identifiers <- function(
+  df,
+  values,
+  columns,
+  include_lr = TRUE
+) {
+  values <- ccc_normalize_use_arg(values)
+  if (is.null(values)) {
+    return(rep(TRUE, nrow(df)))
+  }
+  candidates <- ccc_row_identifier_candidates(
+    df = df,
+    columns = columns,
+    include_lr = include_lr
+  )
+  if (length(candidates) == 0L) {
+    return(rep(FALSE, nrow(df)))
+  }
+  values_key <- ccc_identifier_key(values)
+  keep <- rep(FALSE, nrow(df))
+  for (candidate in candidates) {
+    candidate_chr <- as.character(candidate)
+    candidate_key <- ccc_identifier_key(candidate_chr)
+    keep <- keep |
+      candidate_chr %in% values |
+      candidate_key %in% values_key
+  }
+  keep[is.na(keep)] <- FALSE
+  keep
+}
+
+ccc_filter_bubble_df <- function(
+  df,
+  interaction.use = NULL,
+  pairLR.use = NULL
+) {
+  if (is.null(df) || nrow(df) == 0L) {
+    return(df)
+  }
+  if (!is.null(interaction.use)) {
+    keep <- ccc_match_identifiers(
+      df = df,
+      values = interaction.use,
+      columns = c(
+        "interaction_name",
+        "interaction_name_2",
+        "interaction_label",
+        "interacting_pair"
+      ),
+      include_lr = TRUE
+    )
+    df <- df[keep, , drop = FALSE]
+  }
+  if (!is.null(pairLR.use)) {
+    keep <- ccc_match_identifiers(
+      df = df,
+      values = pairLR.use,
+      columns = c(
+        "pair_lr",
+        "pairLR",
+        "interacting_pair",
+        "interaction_name",
+        "interaction_name_2"
+      ),
+      include_lr = TRUE
+    )
+    df <- df[keep, , drop = FALSE]
+  }
+  df
+}
+
+scale_var <- function(df, color.by = "score", agg_value = "sum") {
+  if (identical(color.by, "pvalue") || identical(color.by, "specificity")) {
+    var <- "specificity"
+    label <- "-log10(pvalue)"
+  } else if (agg_value %in% colnames(df)) {
+    var <- agg_value
+    label <- agg_value
+  } else {
+    var <- "score"
+    label <- "score"
+  }
+  list(var = var, label = label)
+}
+
+ccc_source_target_dot_plot <- function(
+  interaction_df,
+  top_n = 20,
+  color.by = "score",
+  interaction.use = NULL,
+  pairLR.use = NULL,
+  ncols = NULL,
+  nrows = NULL,
+  title = NULL,
+  subtitle = NULL,
+  value_palette = "Reds",
+  value_palcolor = NULL,
+  legend.position = "right",
+  legend.direction = "vertical",
+  font.size = 10,
+  theme_use = "theme_scop",
+  theme_args = list()
+) {
+  if (is.null(interaction_df) || nrow(interaction_df) == 0L) {
+    log_message(
+      "No interaction-level CCC records are available for dot plotting",
+      message_type = "error"
+    )
+  }
+  score_col <- if (identical(color.by, "pvalue")) {
+    c("neglog10_pvalue", "specificity")[
+      c("neglog10_pvalue", "specificity") %in% colnames(interaction_df)
+    ][1]
+  } else {
+    "score"
+  }
+  score_col <- score_col %||% "score"
+  top_n_use <- if (!is.null(interaction.use) || !is.null(pairLR.use)) {
+    NULL
+  } else {
+    top_n
+  }
+  plot_df <- top_interactions(
+    interaction_df,
+    top_n = top_n_use,
+    value_col = score_col
+  )
+  plot_df <- plot_df[
+    is.finite(suppressWarnings(as.numeric(plot_df$score))) &
+      suppressWarnings(as.numeric(plot_df$score)) > 0, ,
+    drop = FALSE
+  ]
+  if (nrow(plot_df) == 0L) {
+    log_message(
+      "No dotplot records remain after filtering",
+      message_type = "error"
+    )
+  }
+  plot_df$target <- as.character(plot_df$receiver)
+  plot_df$source <- as.character(plot_df$sender)
+  plot_df$interaction_plot <- as.character(plot_df$interaction_label)
+  metric <- suppressWarnings(as.numeric(plot_df[[score_col]]))
+  metric[!is.finite(metric)] <- 0
+  plot_df$plot_metric <- metric
+
+  source_order <- names(sort(tapply(plot_df$plot_metric, plot_df$source, sum), decreasing = TRUE))
+  target_order <- names(sort(tapply(plot_df$plot_metric, plot_df$target, sum), decreasing = TRUE))
+  interaction_order <- names(sort(tapply(plot_df$plot_metric, plot_df$interaction_plot, sum), decreasing = FALSE))
+  plot_df$source <- factor(plot_df$source, levels = source_order)
+  plot_df$target <- factor(plot_df$target, levels = target_order)
+  plot_df$interaction_plot <- factor(plot_df$interaction_plot, levels = interaction_order)
+
+  grid <- ccc_panel_grid(
+    n_panels = length(source_order),
+    ncols = ncols,
+    nrows = nrows,
+    context = "source-target dot plot"
+  )
+
+  fill_cols <- palette_colors(
+    palette = value_palette,
+    palcolor = value_palcolor,
+    n = 9
+  )
+  fill_label <- if (identical(color.by, "pvalue")) {
+    "-log10(p-value)"
+  } else {
+    "Communication score"
+  }
+  p <- ggplot2::ggplot(
+    plot_df,
+    ggplot2::aes(
+      x = target,
+      y = interaction_plot,
+      size = score,
+      fill = plot_metric
+    )
+  ) +
+    ggplot2::geom_point(shape = 21, color = "grey20", stroke = 0.25, alpha = 0.9) +
+    ggplot2::facet_wrap(
+      ~source,
+      ncol = grid$ncols,
+      nrow = grid$nrows,
+      scales = "free_x"
+    ) +
+    ggplot2::scale_fill_gradientn(colours = fill_cols, name = fill_label) +
+    ggplot2::scale_size_area(name = "Communication score", max_size = 8) +
+    ggplot2::labs(x = "Target", y = "Interactions (Ligand -> Receptor)")
+
+  finalize_cc_plot(
+    p,
+    title = title,
+    subtitle = subtitle,
+    legend.position = legend.position,
+    legend.direction = legend.direction,
+    theme_use = theme_use,
+    theme_args = theme_args,
+    font.size = font.size
+  ) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 90, hjust = 1, vjust = 0.5),
+      panel.grid.major = ggplot2::element_line(colour = "grey90", linewidth = 0.3),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+}
+
+ccc_source_target_tile_plot <- function(
+  interaction_df,
+  top_n = 20,
+  color.by = "score",
+  interaction.use = NULL,
+  pairLR.use = NULL,
+  title = NULL,
+  subtitle = NULL,
+  value_palette = "Reds",
+  value_palcolor = NULL,
+  legend.position = "right",
+  legend.direction = "vertical",
+  font.size = 10,
+  theme_use = "theme_scop",
+  theme_args = list()
+) {
+  if (is.null(interaction_df) || nrow(interaction_df) == 0L) {
+    log_message(
+      "No interaction-level CCC records are available for tile plotting",
+      message_type = "error"
+    )
+  }
+  score_col <- if (identical(color.by, "pvalue")) {
+    c("neglog10_pvalue", "specificity")[
+      c("neglog10_pvalue", "specificity") %in% colnames(interaction_df)
+    ][1]
+  } else {
+    "score"
+  }
+  score_col <- score_col %||% "score"
+  top_n_use <- if (!is.null(interaction.use) || !is.null(pairLR.use)) {
+    NULL
+  } else {
+    top_n
+  }
+  data <- top_interactions(interaction_df, top_n = top_n_use, value_col = score_col)
+  if (nrow(data) == 0L) {
+    log_message("No tile plot records remain after filtering", message_type = "error")
+  }
+  data$ligand_display <- ifelse(
+    is.na(data$ligand) | !nzchar(data$ligand),
+    data$interaction_label,
+    data$ligand
+  )
+  data$receptor_display <- ifelse(
+    is.na(data$receptor) | !nzchar(data$receptor),
+    data$interaction_label,
+    data$receptor
+  )
+  metric <- suppressWarnings(as.numeric(data[[score_col]]))
+  metric[!is.finite(metric)] <- 0
+  data$plot_metric <- metric
+  interaction_order <- names(sort(tapply(data$plot_metric, data$interaction_label, sum), decreasing = FALSE))
+
+  left <- data.frame(
+    type = "Source ligand",
+    cell_type = data$sender,
+    gene = data$ligand_display,
+    interaction_label = data$interaction_label,
+    plot_metric = data$plot_metric,
+    stringsAsFactors = FALSE
+  )
+  right <- data.frame(
+    type = "Target receptor",
+    cell_type = data$receiver,
+    gene = data$receptor_display,
+    interaction_label = data$interaction_label,
+    plot_metric = data$plot_metric,
+    stringsAsFactors = FALSE
+  )
+  plot_df <- rbind(left, right)
+  plot_df$interaction_label <- factor(plot_df$interaction_label, levels = interaction_order)
+  fill_cols <- palette_colors(
+    palette = value_palette,
+    palcolor = value_palcolor,
+    n = 9
+  )
+  fill_label <- if (identical(color.by, "pvalue")) {
+    "-log10(p-value)"
+  } else {
+    "Communication score"
+  }
+  p <- ggplot2::ggplot(
+    plot_df,
+    ggplot2::aes(x = cell_type, y = interaction_label, fill = plot_metric)
+  ) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.4) +
+    ggplot2::facet_wrap(~type, nrow = 1, scales = "free_x") +
+    ggplot2::scale_fill_gradientn(colours = fill_cols, name = fill_label) +
+    ggplot2::labs(x = "Cell type", y = NULL)
+
+  finalize_cc_plot(
+    p,
+    title = title,
+    subtitle = subtitle,
+    legend.position = legend.position,
+    legend.direction = legend.direction,
+    theme_use = theme_use,
+    theme_args = theme_args,
+    font.size = font.size
+  ) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 90, hjust = 1, vjust = 0.5),
+      panel.grid = ggplot2::element_blank()
+    )
+}
+
+ccc_sample_dot_plot <- function(
+  df,
+  sample_key = "sample",
+  top_n = 20,
+  top_n_pairs = NULL,
+  color.by = "score",
+  interaction.use = NULL,
+  pairLR.use = NULL,
+  ncols = NULL,
+  nrows = NULL,
+  title = NULL,
+  subtitle = NULL,
+  value_palette = "Reds",
+  value_palcolor = NULL,
+  legend.position = "right",
+  legend.direction = "vertical",
+  font.size = 10,
+  theme_use = "theme_scop",
+  theme_args = list()
+) {
+  if (is.null(df) || nrow(df) == 0L) {
+    log_message("No communication records are available for sample dot plotting", message_type = "error")
+  }
+  sample_col <- if (sample_key %in% colnames(df)) {
+    sample_key
+  } else if ("dataset" %in% colnames(df)) {
+    "dataset"
+  } else {
+    NULL
+  }
+  if (is.null(sample_col)) {
+    log_message(
+      "{.arg sample_key} was not found in the CCC result table",
+      message_type = "error"
+    )
+  }
+  df <- prepare_plot_df(df)
+  score_col <- if (identical(color.by, "pvalue")) {
+    c("neglog10_pvalue", "specificity")[
+      c("neglog10_pvalue", "specificity") %in% colnames(df)
+    ][1]
+  } else {
+    "score"
+  }
+  score_col <- score_col %||% "score"
+  score_by_interaction <- sort(
+    tapply(df[[score_col]], df$interaction_label, sum, na.rm = TRUE),
+    decreasing = TRUE
+  )
+  if (!is.null(interaction.use) || !is.null(pairLR.use) || is.null(top_n) || !is.numeric(top_n) || top_n <= 0L) {
+    keep_interactions <- names(score_by_interaction)
+  } else {
+    keep_interactions <- names(score_by_interaction)[seq_len(min(top_n, length(score_by_interaction)))]
+  }
+  df <- df[df$interaction_label %in% keep_interactions, , drop = FALSE]
+  df$sample <- as.character(df[[sample_col]])
+  df$pair <- paste(df$sender, df$receiver, sep = " -> ")
+  if (!is.null(top_n_pairs) && is.numeric(top_n_pairs) && top_n_pairs > 0L) {
+    df$.ccc_metric <- suppressWarnings(as.numeric(df[[score_col]]))
+    df$.ccc_metric[!is.finite(df$.ccc_metric)] <- 0
+    df <- do.call(rbind, lapply(split(df, df$interaction_label), function(df_i) {
+      pair_scores <- sort(tapply(df_i$.ccc_metric, df_i$pair, sum, na.rm = TRUE), decreasing = TRUE)
+      keep_pairs <- names(pair_scores)[seq_len(min(top_n_pairs, length(pair_scores)))]
+      df_i[df_i$pair %in% keep_pairs, , drop = FALSE]
+    }))
+    rownames(df) <- NULL
+    df$.ccc_metric <- NULL
+  }
+  if (nrow(df) == 0L) {
+    log_message("No sample dotplot records remain after filtering", message_type = "error")
+  }
+  df$interaction_label <- factor(df$interaction_label, levels = keep_interactions)
+  grid <- ccc_panel_grid(
+    n_panels = length(keep_interactions),
+    ncols = ncols %||% min(3L, length(keep_interactions)),
+    nrows = nrows,
+    context = "sample dot plot"
+  )
+  fill_cols <- palette_colors(
+    palette = value_palette,
+    palcolor = value_palcolor,
+    n = 9
+  )
+  fill_label <- if (identical(color.by, "pvalue")) {
+    "-log10(p-value)"
+  } else {
+    "Communication score"
+  }
+  p <- ggplot2::ggplot(
+    df,
+    ggplot2::aes(x = sample, y = pair, size = score, fill = .data[[score_col]])
+  ) +
+    ggplot2::geom_point(shape = 21, color = "grey20", stroke = 0.25, alpha = 0.9) +
+    ggplot2::facet_wrap(
+      ~interaction_label,
+      ncol = grid$ncols,
+      nrow = grid$nrows,
+      scales = "free_y"
+    ) +
+    ggplot2::scale_fill_gradientn(colours = fill_cols, name = fill_label) +
+    ggplot2::scale_size_area(name = "Communication score", max_size = 8) +
+    ggplot2::labs(x = sample_col, y = "Sender -> receiver")
+
+  finalize_cc_plot(
+    p,
+    title = title,
+    subtitle = subtitle,
+    legend.position = legend.position,
+    legend.direction = legend.direction,
+    theme_use = theme_use,
+    theme_args = theme_args,
+    font.size = font.size
+  ) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 90, hjust = 1, vjust = 0.5),
+      panel.grid.major = ggplot2::element_line(colour = "grey90", linewidth = 0.3),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+}

@@ -1,0 +1,323 @@
+make_cside_seurat <- function() {
+  counts <- matrix(
+    c(
+      5, 0, 3, 2,
+      0, 4, 1, 6,
+      2, 1, 0, 3
+    ),
+    nrow = 3,
+    byrow = TRUE,
+    dimnames = list(paste0("Gene", 1:3), paste0("Spot", 1:4))
+  )
+  srt <- Seurat::CreateSeuratObject(
+    counts = methods::as(Matrix::Matrix(counts, sparse = TRUE), "dgCMatrix")
+  )
+  srt$condition <- c("A", "B", "A", "B")
+  srt$region <- c("left", "middle", "right", "right")
+  srt$col <- c(1, 2, 3, 4)
+  srt$row <- c(1, 1, 2, 2)
+  srt@tools$RCTD <- list(
+    object = structure(list(id = "mock-rctd"), class = "RCTD"),
+    backend_api = "SpatialRNA/Reference/create.RCTD/run.RCTD",
+    parameters = list(
+      image = NA_character_,
+      coord.cols = c("col", "row"),
+      coordinate_space = "raw",
+      rctd_mode = "full"
+    )
+  )
+  srt
+}
+
+test_cside_truthful_storage <- function() {
+  srt <- make_cside_seurat()
+  srt@tools$custom <- list(old = TRUE)
+  before <- srt
+  messages <- character()
+  local_mocked_bindings(log_message = function(message, verbose = TRUE, ...) {
+    if (isTRUE(verbose)) messages <<- c(messages, message)
+  }, .package = "scop")
+  with_mock_cside(list("run.CSIDE.single" = function(...) mock_cside_result()), {
+    out <- RunCSIDE(srt,
+      condition.by = "condition", store_results = FALSE,
+      tool_name = "custom", prefix = "custom"
+    )
+    expect_identical(out@tools$custom, srt@tools$custom)
+    expect_equal(unique(out$custom_n_sig), 1)
+    expect_true(any(grepl("not stored", messages)))
+    messages <- character()
+    out <- RunCSIDE(srt, condition.by = "condition", tool_name = "custom", prefix = "custom")
+    expect_true("result_table" %in% names(out@tools$custom))
+    expect_true(any(grepl("results stored", messages)))
+    messages <- character()
+    out <- RunCSIDE(srt, condition.by = "condition", verbose = FALSE)
+    expect_length(messages, 0L)
+  })
+  with_mock_cside(list("run.CSIDE.single" = function(...) stop("backend failed")), {
+    messages <- character()
+    expect_error(RunCSIDE(srt, condition.by = "condition"), "backend failed")
+    expect_false(any(grepl("results stored|completed", messages)))
+  })
+  expect_identical(srt, before)
+}
+
+mock_cside_result <- function() {
+  list(
+    de_results = list(
+      all_gene_list = list(
+        Alpha = data.frame(
+          Z_score = c(3.0, 1.2),
+          log_fc = c(0.8, 0.1),
+          se = c(0.2, 0.3),
+          paramindex_best = c(2, 2),
+          p_val = c(0.001, 0.2),
+          row.names = c("Gene1", "Gene2")
+        )
+      ),
+      sig_gene_list = list(
+        Alpha = data.frame(
+          Z_score = 3.0,
+          log_fc = 0.8,
+          p_val = 0.001,
+          row.names = "Gene1"
+        )
+      ),
+      gene_fits = list(converged = TRUE)
+    ),
+    internal_vars_de = list(
+      cell_types = "Alpha",
+      params_to_test = 2
+    )
+  )
+}
+
+with_mock_cside <- function(funs, code) {
+  testthat::local_mocked_bindings(
+    .package = "scop",
+    check_r = function(packages, ...) {
+      expect_identical(packages, "dmcable/spacexr")
+      invisible(TRUE)
+    },
+    get_namespace_fun = function(package, name) {
+      expect_identical(package, "spacexr")
+      if (!name %in% names(funs)) {
+        stop("missing backend")
+      }
+      funs[[name]]
+    }
+  )
+  force(code)
+}
+
+test_that("C-SIDE storage messages describe this run and retain metadata", {
+  test_cside_truthful_storage()
+})
+
+test_that("RunCSIDE validates Seurat and stored RCTD inputs", {
+  expect_error(
+    RunCSIDE(matrix(1, nrow = 2), verbose = FALSE),
+    "Seurat"
+  )
+  srt <- make_cside_seurat()
+  srt@tools$RCTD <- NULL
+  expect_error(
+    RunCSIDE(srt, verbose = FALSE),
+    "No RCTD object"
+  )
+  srt@tools$RCTD <- list(object = list(new_api = TRUE))
+  expect_error(
+    RunCSIDE(srt, verbose = FALSE),
+    "old-api"
+  )
+})
+
+test_that("RunCSIDE condition.by dispatches to single backend", {
+  srt <- make_cside_seurat()
+  fake_single <- function(myRCTD, explanatory.variable, cell_types, gene_threshold, ...) {
+    expect_s3_class(myRCTD, "RCTD")
+    expect_identical(cell_types, "Alpha")
+    expect_equal(unname(explanatory.variable[colnames(srt)]), c(0, 1, 0, 1))
+    expect_identical(gene_threshold, 0.01)
+    mock_cside_result()
+  }
+
+  with_mock_cside(list("run.CSIDE.single" = fake_single), {
+    out <- RunCSIDE(
+      srt,
+      condition.by = "condition",
+      celltypes = "Alpha",
+      gene_threshold = 0.01,
+      verbose = FALSE
+    )
+  })
+
+  expect_true("CSIDE" %in% names(out@tools))
+  expect_named(
+    out@tools$CSIDE$result_table,
+    c(
+      "feature", "celltype", "parameter", "logFC", "statistic",
+      "p_value", "q_value", "significant", "method"
+    )
+  )
+  expect_equal(out@tools$CSIDE$result_table$feature, c("Gene1", "Gene2"))
+  expect_equal(out@tools$CSIDE$result_table$celltype, c("Alpha", "Alpha"))
+  expect_equal(out@tools$CSIDE$result_table$significant, c(TRUE, FALSE))
+  expect_equal(unique(out$CSIDE_n_sig), 1)
+  expect_equal(unique(out$CSIDE_mode), "single")
+  expect_identical(out@tools$CSIDE$parameters$rctd_source, "stored_rctd_result")
+  expect_identical(out@tools$CSIDE$parameters$rctd_tool_name, "RCTD")
+  expect_identical(out@tools$CSIDE$cells, colnames(out))
+})
+
+test_that("RunCSIDE single mode aligns finite covariates with its retained barcodes", {
+  srt <- make_cside_seurat()
+  cases <- list(
+    c(Spot4 = 1, Spot2 = NA_real_, Spot1 = 0, Spot3 = 0.5),
+    c(Spot4 = 1, Spot2 = Inf, Spot1 = 0, Spot3 = -Inf),
+    c(Spot4 = 1, Spot1 = 0)
+  )
+  for (covariate in cases) {
+    expected_ids <- colnames(srt)[colnames(srt) %in% names(covariate)[is.finite(covariate)]]
+    expected <- covariate[expected_ids]
+    seen <- NULL
+    with_mock_cside(list("run.CSIDE.single" = function(myRCTD, explanatory.variable, ...) {
+      seen <<- explanatory.variable
+      expect_identical(explanatory.variable, expected)
+      expect_true(all(is.finite(explanatory.variable)))
+      mock_cside_result()
+    }), {
+      out <- RunCSIDE(srt, explanatory.variable = covariate, verbose = FALSE)
+    })
+    expect_identical(out@tools$CSIDE$barcodes, names(seen))
+    expect_identical(colnames(out), colnames(srt))
+  }
+})
+
+test_that("RunCSIDE single mode excludes missing conditions before backend dispatch", {
+  srt <- make_cside_seurat()
+  srt$condition <- c("A", NA_character_, "A", "B")
+  with_mock_cside(list("run.CSIDE.single" = function(myRCTD, explanatory.variable, ...) {
+    expect_identical(explanatory.variable, c(Spot1 = 0, Spot3 = 0, Spot4 = 1))
+    mock_cside_result()
+  }), {
+    out <- RunCSIDE(srt, condition.by = "condition", verbose = FALSE)
+    expect_error(RunCSIDE(srt, explanatory.variable = c(0, NA, Inf, NaN), verbose = FALSE),
+      "at least two finite values")
+  })
+  expect_identical(out@tools$CSIDE$barcodes, c("Spot1", "Spot3", "Spot4"))
+  expect_identical(out@tools$CSIDE$parameters$condition_levels, c("A", "B"))
+})
+
+test_that("RunCSIDE group.by builds region_list and dispatches to regions backend", {
+  srt <- make_cside_seurat()
+  fake_regions <- function(myRCTD, region_list, cell_types, ...) {
+    expect_identical(list(...)$doublet_mode, FALSE)
+    expect_named(region_list, c("left", "middle", "right"))
+    expect_equal(region_list$left, "Spot1")
+    expect_equal(region_list$middle, "Spot2")
+    expect_equal(region_list$right, c("Spot3", "Spot4"))
+    expect_null(cell_types)
+    mock_cside_result()
+  }
+
+  with_mock_cside(list("run.CSIDE.regions" = fake_regions), {
+    out <- RunCSIDE(
+      srt,
+      group.by = "region",
+      prefix = "REG",
+      tool_name = "REG_tool",
+      verbose = FALSE
+    )
+  })
+
+  expect_true("REG_tool" %in% names(out@tools))
+  expect_equal(unique(out$REG_mode), "regions")
+  expect_equal(out@tools$REG_tool$barcodes, paste0("Spot", 1:4))
+})
+
+test_that("RunCSIDE design dispatches to general backend and keeps explicit backend args", {
+  srt <- make_cside_seurat()
+  design <- data.frame(
+    intercept = 1,
+    condition = c(0, 1, 0, 1),
+    row.names = colnames(srt)
+  )
+  fake_general <- function(
+    myRCTD,
+    X,
+    barcodes,
+    cell_types,
+    cell_type_specific,
+    params_to_test,
+    ...
+  ) {
+    expect_equal(rownames(X), c("Spot2", "Spot4"))
+    expect_equal(barcodes, c("Spot2", "Spot4"))
+    expect_identical(cell_types, c("Alpha", "Beta"))
+    expect_identical(cell_type_specific, c(FALSE, TRUE))
+    expect_identical(params_to_test, 2L)
+    mock_cside_result()
+  }
+
+  with_mock_cside(list("run.CSIDE" = fake_general), {
+    out <- RunCSIDE(
+      srt,
+      design = design,
+      barcodes = c("Spot2", "Spot4"),
+      celltypes = c("Alpha", "Beta"),
+      cell_type_specific = c(FALSE, TRUE),
+      params_to_test = 2L,
+      verbose = FALSE
+    )
+  })
+
+  expect_equal(unique(out$CSIDE_mode), "general")
+  expect_equal(out@tools$CSIDE$parameters$backend_args$params_to_test, 2L)
+})
+
+test_that("RunCSIDE intercept mode and backend availability errors are clear", {
+  srt <- make_cside_seurat()
+  fake_intercept <- function(myRCTD, barcodes, cell_types, ...) {
+    expect_equal(barcodes, c("Spot1", "Spot3"))
+    expect_null(cell_types)
+    mock_cside_result()
+  }
+
+  with_mock_cside(list("run.CSIDE.intercept" = fake_intercept), {
+    out <- RunCSIDE(
+      srt,
+      barcodes = c("Spot1", "Spot3"),
+      verbose = FALSE
+    )
+  })
+  expect_equal(unique(out$CSIDE_mode), "intercept")
+
+  with_mock_cside(list(), {
+    expect_error(
+      RunCSIDE(srt, condition.by = "condition", verbose = FALSE),
+      "dmcable/spacexr"
+    )
+  })
+})
+
+test_that("RunCSIDE records external RCTD lineage in stored parameters", {
+  srt <- make_cside_seurat()
+  external <- srt@tools$RCTD$object
+  fake_intercept <- function(myRCTD, barcodes, cell_types, ...) {
+    expect_identical(myRCTD, external)
+    mock_cside_result()
+  }
+
+  with_mock_cside(list("run.CSIDE.intercept" = fake_intercept), {
+    out <- RunCSIDE(
+      srt,
+      rctd_result = external,
+      barcodes = c("Spot1", "Spot3"),
+      verbose = FALSE
+    )
+  })
+
+  result <- out@tools$CSIDE
+  expect_identical(result$parameters$rctd_source, "external_rctd_result")
+  expect_identical(result$cells, c("Spot1", "Spot3"))
+})

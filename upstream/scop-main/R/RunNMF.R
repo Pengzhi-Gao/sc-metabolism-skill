@@ -1,0 +1,289 @@
+#' @title Run NMF
+#'
+#' @md
+#' @inheritParams thisutils::log_message
+#' @inheritParams RunUMAP2
+#' @param object An object. This can be a Seurat object, an Assay object, or a matrix-like object.
+#' @param nbes The number of basis vectors (components) to be computed.
+#' @param nmf.method The NMF algorithm to be used.
+#' Currently supported values are `"RcppML"` and `"NMF"`.
+#' @param tol The tolerance for convergence (only applicable when nmf.method is `"RcppML"`).
+#' @param maxit The maximum number of iterations for convergence (only applicable when nmf.method is `"RcppML"`).
+#' @param rev.nmf Whether to perform reverse NMF (i.e., transpose the input matrix) before running the analysis.
+#' @param ndims.print The dimensions (number of basis vectors) to print in the output.
+#' @param nfeatures.print The number of features to print in the output.
+#' @param reduction.name Reduction to be stored in the Seurat object.
+#' @param reduction.key The prefix for the column names of the basis vectors.
+#' @param cores The number of threads to be used in older `RcppML` releases
+#' that expose a global OpenMP thread setter. Newer releases manage their
+#' thread count internally.
+#' @param ... Additional arguments passed to [RcppML::nmf] or [NMF::nmf].
+#'
+#' @rdname RunNMF
+#' @export
+#'
+#' @examples
+#' data(pancreas_sub)
+#' pancreas_sub <- RunStandardWorkflow(pancreas_sub)
+#' pancreas_sub <- RunNMF(pancreas_sub)
+#' CellDimPlot(
+#'   pancreas_sub,
+#'   group.by = "CellType",
+#'   reduction = "nmf"
+#' )
+#'
+#' FeatureDimPlot(
+#'   pancreas_sub,
+#'   features = c("BE_1", "BE_2", "BE_3"),
+#'   reduction = "UMAP",
+#'   palette = "RdBu",
+#'   xlab = "UMAP_1",
+#'   ylab = "UMAP_2",
+#'   theme_use = "theme_blank"
+#' )
+#'
+#' ht_cells <- NMFHeatmap(
+#'   pancreas_sub,
+#'   plot_type = "cells",
+#'   cell_annotation = "CellType"
+#' )
+#' ht_cells$plot
+#'
+#' ht_features <- NMFHeatmap(
+#'   pancreas_sub,
+#'   plot_type = "features"
+#' )
+#' ht_features$plot
+RunNMF <- function(object, ...) {
+  UseMethod(generic = "RunNMF", object = object)
+}
+
+nmf_feature_variances <- function(x) {
+  if (inherits(x, "dgCMatrix")) {
+    return(sparse_row_mean_var(
+      p = x@p,
+      i = x@i,
+      x = x@x,
+      nrow = nrow(x),
+      ncol = ncol(x)
+    )[["variance"]])
+  }
+  check_r("matrixStats", verbose = FALSE)
+  matrixStats::rowVars(as.matrix(x))
+}
+
+#' @rdname RunNMF
+#' @method RunNMF Seurat
+#' @export
+RunNMF.Seurat <- function(
+  object,
+  assay = NULL,
+  layer = "data",
+  features = NULL,
+  nbes = 50,
+  nmf.method = "RcppML",
+  tol = 1e-5,
+  maxit = 100,
+  rev.nmf = FALSE,
+  ndims.print = 1:5,
+  nfeatures.print = 30,
+  reduction.name = "nmf",
+  reduction.key = "BE_",
+  verbose = TRUE,
+  seed.use = 11,
+  cores = 0,
+  ...
+) {
+  log_message("Running {.pkg NMF}...", verbose = verbose)
+  set.seed(seed = seed.use)
+
+  features <- features %||% SeuratObject::VariableFeatures(object = object)
+  assay <- assay %||% SeuratObject::DefaultAssay(object = object)
+  assay_data <- Seurat::GetAssay(object = object, assay = assay)
+  reduction_data <- RunNMF(
+    object = assay_data,
+    assay = assay,
+    layer = layer,
+    features = features,
+    nbes = nbes,
+    nmf.method = nmf.method,
+    tol = tol,
+    maxit = maxit,
+    rev.nmf = rev.nmf,
+    verbose = verbose,
+    ndims.print = ndims.print,
+    nfeatures.print = nfeatures.print,
+    reduction.key = reduction.key,
+    seed.use = seed.use,
+    cores = cores,
+    ...
+  )
+  object[[reduction.name]] <- reduction_data
+  object <- Seurat::LogSeuratCommand(object = object)
+
+  log_message(
+    "{.pkg NMF} compute completed",
+    message_type = "success",
+    verbose = verbose
+  )
+  return(object)
+}
+
+#' @rdname RunNMF
+#' @method RunNMF Assay
+#' @export
+RunNMF.Assay <- function(
+  object,
+  assay = NULL,
+  layer = "data",
+  features = NULL,
+  nbes = 50,
+  nmf.method = "RcppML",
+  tol = 1e-5,
+  maxit = 100,
+  rev.nmf = FALSE,
+  ndims.print = 1:5,
+  nfeatures.print = 30,
+  reduction.key = "BE_",
+  verbose = TRUE,
+  seed.use = 11,
+  cores = 0,
+  ...
+) {
+  features <- features %||% SeuratObject::VariableFeatures(object = object)
+  data_use <- GetAssayData5(
+    object = object,
+    layer = layer
+  )
+  features_var <- nmf_feature_variances(data_use[features, , drop = FALSE])
+  features_keep <- features[features_var > 0]
+  data_use <- data_use[features_keep, ]
+  reduction_data <- RunNMF(
+    object = data_use,
+    assay = assay,
+    layer = layer,
+    nbes = nbes,
+    nmf.method = nmf.method,
+    tol = tol,
+    maxit = maxit,
+    rev.nmf = rev.nmf,
+    verbose = verbose,
+    ndims.print = ndims.print,
+    nfeatures.print = nfeatures.print,
+    reduction.key = reduction.key,
+    seed.use = seed.use,
+    cores = cores,
+    ...
+  )
+  return(reduction_data)
+}
+
+#' @rdname RunNMF
+#' @method RunNMF Assay5
+#' @export
+RunNMF.Assay5 <- RunNMF.Assay
+
+#' @rdname RunNMF
+#' @method RunNMF default
+#' @export
+RunNMF.default <- function(
+  object,
+  assay = NULL,
+  layer = "data",
+  nbes = 50,
+  nmf.method = "RcppML",
+  tol = 1e-5,
+  maxit = 100,
+  rev.nmf = FALSE,
+  ndims.print = 1:5,
+  nfeatures.print = 30,
+  reduction.key = "BE_",
+  verbose = TRUE,
+  cores = 0,
+  seed.use = 11,
+  ...
+) {
+  set.seed(seed = seed.use)
+  if (rev.nmf) {
+    object <- Matrix::t(x = object)
+  }
+  nbes <- min(nbes, nrow(x = object) - 1)
+  if (nmf.method == "RcppML") {
+    check_r("RcppML", verbose = FALSE)
+    old_rcppml_verbose <- getOption("RcppML.verbose", default = TRUE)
+    options("RcppML.verbose" = FALSE)
+    on.exit(options("RcppML.verbose" = old_rcppml_verbose), add = TRUE)
+    needs_matrix_attached <- inherits(object, "sparseMatrix") &&
+      !"package:Matrix" %in% search() &&
+      utils::packageVersion("RcppML") < "1.0.0"
+    if (needs_matrix_attached) {
+      attachNamespace("Matrix")
+      on.exit(
+        detach("package:Matrix", unload = FALSE, character.only = FALSE),
+        add = TRUE
+      )
+    }
+    set_threads <- get0(
+      "setRcppMLthreads",
+      envir = asNamespace("RcppML"),
+      inherits = FALSE
+    )
+    if (is.function(set_threads)) {
+      set_threads(cores)
+    }
+
+    nmf_results <- RcppML::nmf(
+      Matrix::t(object),
+      k = nbes,
+      tol = tol,
+      maxit = maxit,
+      verbose = FALSE,
+      ...
+    )
+    cell_embeddings <- nmf_results$w
+    feature_loadings <- Matrix::t(nmf_results$h)
+  }
+
+  if (nmf.method == "NMF") {
+    check_r("NMF", verbose = FALSE)
+    nmf_results <- NMF::nmf(
+      x = as_matrix(
+        Matrix::t(object)
+      ),
+      rank = nbes
+    )
+    cell_embeddings <- nmf_results@fit@W
+    feature_loadings <- Matrix::t(nmf_results@fit@H)
+  }
+
+  rownames(x = feature_loadings) <- rownames(x = object)
+  colnames(x = feature_loadings) <- paste0(reduction.key, 1:nbes)
+  rownames(x = cell_embeddings) <- colnames(x = object)
+  colnames(x = cell_embeddings) <- colnames(x = feature_loadings)
+  reduction_data <- Seurat::CreateDimReducObject(
+    embeddings = cell_embeddings,
+    loadings = feature_loadings,
+    assay = assay,
+    key = reduction.key,
+    misc = list(
+      slot = layer,
+      nmf_results = nmf_results
+    )
+  )
+  if (verbose) {
+    msg <- utils::capture.output(
+      print(
+        x = reduction_data,
+        dims = ndims.print,
+        nfeatures = nfeatures.print
+      )
+    )
+    log_message(
+      paste(msg, collapse = "\n"),
+      multiline_indent = FALSE,
+      timestamp = FALSE
+    )
+  }
+
+  return(reduction_data)
+}

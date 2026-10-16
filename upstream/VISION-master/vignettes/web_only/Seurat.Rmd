@@ -1,0 +1,69 @@
+---
+title: "How To: Working with Seurat"
+---
+
+If you are already using Seurat for your analysis, VISION provides a convenience function for creating a Vision object from a Seurat object.
+
+## How this works
+
+* By default, `assay = "RNA"`, though this parameter is configurable.
+* `obj@[[assay]]@counts` is used as the expression input (after normalizing to a library size of 10,000)
+* The cell meta-data is taken from `obj@meta.data`
+* Lower-dimensional visualizations are taken each dimensionality reduction in `Reductions(obj)`
+  * These are added using their original names prefixed with "Seurat\_"
+* If "pca" has been run, the latentSpace input is taken from its associated cell embeddings
+  * The `dimRed` parameter can be used to select a different dimensionality reduction for this
+  * The `dimRedComponents` can be used to limit the number of components used (Default: All components)
+  * Otherwise, VISION computes the latentSpace by running PCA internally
+
+### Recommendations when using Seurat `IntegrateData`
+
+When using `IntegrateData`, a new assay is created called `integrated`.
+
+We recommend creating your reduced-dimensional representation using this assay by running PCA in Seurat after `IntegrateData`.
+
+Then create the Vision object, but use the default `assay="RNA"`.
+
+* The original (normalized) counts will be used as the expression input
+* However, the integrated latent space will be used to create the neighbors graph
+
+Why not use the integrated expression data?  Typically this data only consists of a subset of the genes (e.g. 2000 highly-variable genes) and so is not ideal for matching genes in signatures.
+
+## Examples
+
+Assuming you already have a Seurat object defined as `seurat.obj`, you can use it in this way:
+
+```{r, collapse=T, eval=F}
+signatures <- c("data/h.all.v5.2.symbols.gmt")
+
+vision.obj <- Vision(seurat.obj, signatures = signatures)
+
+vision.obj <- analyze(vision.obj)
+
+viewResults(vision.obj)
+```
+
+The above call would take the "pca" dimensionality reduction from `seurat.obj` if it is defined.  If you instead had run a Diffusion Map using Seurat and wanted to use that as your latent space, you could specify that like this:
+
+```{r, collapse=T, eval=F}
+vision.obj <- Vision(seurat.obj,
+    signatures = signatures,
+    dimRed <- "dm")
+```
+
+Any of the other `Vision()` constructor parameters can also be passed here.  For example, if you wanted to enable microclustering with 5 cells per micropool:
+
+```{r, collapse=T, eval=F}
+vision.obj <- Vision(seurat.obj,
+    signatures = signatures,
+    pool = T, cellsPerPartition = 5
+    )
+```
+
+By default, Vision will still run tSNE as part of the main analysis pipeline.  You may wish to skip this if a visualization has already been run in Seurat.  To instruction VISION to not run any additional visualization projections, set `projection_methods = NULL` like so:
+
+```{r, collapse=T, eval=F}
+vision.obj <- Vision(seurat.obj,
+    signatures = signatures,
+    projection_methods = NULL)
+```

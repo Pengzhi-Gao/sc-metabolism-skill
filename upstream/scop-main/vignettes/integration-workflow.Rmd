@@ -1,0 +1,294 @@
+---
+title: "Data integration workflow"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  eval = TRUE,
+  error = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 12, fig.height = 8,
+  dpi = 144,
+  out.width = "100%"
+)
+```
+
+## What you will do
+
+- **Question:** does correction reduce technology effects while retaining cell types?
+- **Input:** All 1,600 cells and 12,932 supplied genes in `panc8_sub`; `tech` identifies five technologies and `celltype` supplies evaluation labels.
+- **Output:** Uncorrected and Harmony reductions on the same cells, marker checks and a reloadable integrated object.
+- **How to run:** start a fresh R session and run the chunks in order. Printed tables and figures below are generated from that run; code-only alternatives are identified explicitly.
+
+
+
+Use integration when technical structure prevents comparison across samples or
+platforms, and retain an unintegrated baseline. If every condition occurs in
+only one batch, batch and biology are confounded: no attractive embedding can
+resolve that experimental-design problem.
+
+## Prepare the required Harmony source
+
+SCOP's `RunHarmony2()` checks the official GitHub package origin. A CRAN
+installation with the same package name does not satisfy that check and can
+trigger an installation attempt in the middle of an analysis. Install the
+official GitHub source before starting this page, then restart R:
+
+```r
+remotes::install_github(
+  "immunogenomics/harmony",
+  upgrade = "never"
+)
+```
+
+The tutorial's dependency preflight is read-only. It fails with a clear setup
+requirement instead of allowing an implicit installation during fitting.
+
+## Prepare a Merged Object
+
+The example uses the bundled `panc8_sub` object, a subset of human pancreas
+datasets. The `tech` column records the batch or technology label.
+The `celltype` column is used as known biology for diagnostics, not as a target
+to force during integration.
+
+```{r load-object}
+library(scop)
+set.seed(11)
+harmony_source <- utils::packageDescription("harmony")
+stopifnot(identical(harmony_source$RemoteUsername, "immunogenomics"),
+          identical(harmony_source$RemoteRepo, "harmony"))
+data.frame(package = "harmony", version = harmony_source$Version,
+           source = paste(harmony_source$RemoteUsername, harmony_source$RemoteRepo, sep = "/"),
+           revision = harmony_source$RemoteSha)
+
+data(panc8_sub)
+input_cells <- colnames(panc8_sub)
+stopifnot(!anyNA(panc8_sub$tech), !anyNA(panc8_sub$celltype))
+data.frame(genes = nrow(panc8_sub), cells = ncol(panc8_sub))
+table(panc8_sub$tech)
+table(panc8_sub$celltype)
+```
+
+Always inspect the unintegrated embedding or PCA first. This gives you a
+baseline for deciding whether integration removes technical structure without
+erasing cell-type structure.
+
+```{r unintegrated-check}
+panc8_sub <- RunStandardWorkflow(panc8_sub, assay = "RNA", seed = 11, cores = 1,
+                                 verbose = FALSE)
+
+CellDimPlot(
+  panc8_sub,
+  group.by = c("tech", "celltype"),
+  reduction = "UMAP",
+  theme_use = "theme_blank"
+)
+```
+
+## Run an Integration Method
+
+Harmony is a common first pass when the object is already a merged Seurat
+object with a batch column.
+
+```{r run-harmony}
+panc8_harmony <- RunIntegration(
+  srt_merge = panc8_sub,
+  batch = "tech",
+  integration_methods = "Harmony",
+  nonlinear_reduction_dims = 2,
+  seed = 11, verbose = FALSE
+)
+
+stopifnot(identical(colnames(panc8_harmony), input_cells))
+SeuratObject::Reductions(panc8_harmony)
+```
+
+Use the method-specific integrated UMAP for plotting. The exact reduction name
+depends on the selected method; for Harmony, the examples use `HarmonyUMAP2D`.
+When comparing methods, report the reduction name explicitly. A plot labeled
+only as UMAP is ambiguous once an object contains uncorrected and integrated
+embeddings.
+
+```{r plot-harmony}
+CellDimPlot(
+  panc8_harmony,
+  group.by = c("tech", "celltype"),
+  reduction = "HarmonyUMAP2D",
+  theme_use = "theme_blank"
+)
+```
+
+## Choose a Method
+
+Use method choice to match the data and dependency budget:
+
+- `Harmony`, `fastMNN`, `MNN`, `ComBat`, and `Seurat` methods are practical
+  R-side choices for many scRNA-seq batch problems.
+- `scVI`, `BBKNN`, `Scanorama`, `GLUE`, and `MultiMAP` require Python-side
+  dependencies but can be useful for large datasets or multimodal settings.
+- `WNN` and cross-modality methods are better suited to multimodal RNA + ATAC
+  or paired-modality objects than to ordinary batch correction.
+- `Uncorrected` is useful as a baseline and should be kept in reports when
+  showing that integration changed the object.
+
+
+
+The following alternatives are recipes, not additional measured results in this
+page. To compare executed methods, use the [integration benchmark](integration-benchmark-workflow.html).
+Other methods follow the same entry-point pattern, but may require additional
+runtime dependencies or matrix backends:
+
+```r
+panc8_rpca <- RunIntegration(
+  srt_merge = panc8_sub,
+  batch = "tech",
+  integration_methods = "RPCA"
+)
+
+panc8_fastmnn <- RunIntegration(
+  srt_merge = panc8_sub,
+  batch = "tech",
+  integration_methods = "fastMNN"
+)
+```
+
+## Inspect Integration Quality
+
+Do not judge integration from batch mixing alone. Also check known labels,
+marker genes, and whether rare cell types remain separated.
+
+```{r inspect-quality}
+CellDimPlot(
+  panc8_harmony,
+  group.by = "tech",
+  reduction = "HarmonyUMAP2D",
+  theme_use = "theme_blank"
+)
+
+CellDimPlot(
+  panc8_harmony,
+  group.by = "celltype",
+  reduction = "HarmonyUMAP2D",
+  label = TRUE,
+  label_repel = TRUE, label.size = 3,
+  theme_use = "theme_blank"
+)
+
+FeatureDimPlot(
+  panc8_harmony,
+  features = c("GCG", "SST", "KRT19"),
+  reduction = "HarmonyUMAP2D"
+)
+```
+
+When comparing methods, keep the input object fixed and compare the same
+metadata labels, marker genes, and diagnostic plots across methods. The
+unintegrated baseline is useful because it shows what the integration changed.
+Good integration mixes batches within the same biological state while keeping
+distinct cell types and marker programs separated. Overcorrection is visible
+when expected marker-defined groups collapse together.
+
+
+
+INS is absent from the supplied feature-filtered object, so this marker
+check uses measured GCG, SST and KRT19. Missing input genes must not be
+interpreted as measured zero expression.
+
+## Save, reload, and check the hand-off
+
+The build uses a temporary directory so repeated rendering cannot overwrite a
+previous analysis. For your work, replace it with a new persistent output folder.
+Save the object **and** plain-text metadata; a figure alone cannot reproduce the
+analysis. No cells are sampled for this export.
+
+```{r export-reload}
+output_dir <- file.path(tempdir(), "integration-workflow")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+result_file <- file.path(output_dir, "analysis.rds")
+saveRDS(panc8_harmony, result_file)
+utils::write.csv(panc8_harmony@meta.data, file.path(output_dir, "cell-metadata.csv"))
+reloaded <- readRDS(result_file)
+stopifnot(identical(colnames(reloaded), colnames(panc8_harmony)),
+          identical(reloaded@meta.data, panc8_harmony@meta.data),
+          identical(SeuratObject::Reductions(reloaded),
+                    SeuratObject::Reductions(panc8_harmony)))
+data.frame(file = basename(list.files(output_dir, full.names = TRUE)),
+           bytes = file.info(list.files(output_dir, full.names = TRUE))$size)
+```
+
+## Use your own data and recover common errors
+
+- Replace the `data(...)` input with `readRDS("your-object.rds")`, or create a
+  Seurat object from a gene-by-cell raw-count matrix. Check that cell IDs are
+  unique and metadata row names equal the expression column names.
+- Set the assay and grouping columns explicitly. Species, gene identifiers and
+  reference labels must match your experiment; do not copy pancreas labels to
+  unrelated tissue.
+- If a reduction or metadata column is missing, inspect
+  `SeuratObject::Reductions(object)` and `colnames(object@meta.data)`, then run
+  its producer chunk. A plot does not create the result it needs.
+- If a dependency is unavailable, install it in the analysis environment,
+  restart R and rerun from the input chunk. A skipped or failed method is not
+  evidence that it worked. Preserve warnings and the exact error in your report.
+
+## Build and analysis provenance
+
+The receipt records the R seed. Python methods retain their documented backend
+seeds and parameters; setting the R seed alone does not control every backend.
+Package versions, BLAS libraries and backend changes can alter numerical results. Keep
+this receipt with the exported object. It describes this page's actual render.
+
+```{r provenance}
+source_revision <- Sys.getenv("GITHUB_SHA")
+if (!nzchar(source_revision) && nzchar(Sys.which("git"))) {
+  source_revision <- tryCatch(system2("git", c("rev-parse", "HEAD"), stdout = TRUE,
+                                      stderr = FALSE)[1], error = function(e) NA_character_)
+}
+article_source <- knitr::current_input(dir = TRUE)
+build_receipt <- data.frame(
+  article = "integration-workflow",
+  built_utc = format(Sys.time(), tz = "UTC", usetz = TRUE),
+  scop = as.character(utils::packageVersion("scop")),
+  R = as.character(getRversion()),
+  source_revision = source_revision,
+  source_has_local_changes = if (nzchar(Sys.which("git")))
+    length(system2("git", c("status", "--porcelain"), stdout = TRUE, stderr = FALSE)) > 0 else NA,
+  article_md5 = unname(tools::md5sum(article_source)),
+  R_seed = 11,
+  cells_retained = ncol(panc8_harmony),
+  genes_in_active_assay = nrow(panc8_harmony),
+  stringsAsFactors = FALSE
+)
+build_receipt
+utils::write.csv(build_receipt, file.path(output_dir, "build-receipt.csv"),
+                 row.names = FALSE)
+writeLines(capture.output(sessionInfo()), file.path(output_dir, "session-info.txt"))
+```
+
+<details>
+<summary>Show the complete R session used for this page</summary>
+
+```{r session-info}
+sessionInfo()
+```
+
+</details>
+
+## What to Report
+
+A compact integration report should include:
+
+- the batch column and biological annotation columns used for evaluation;
+- the integration method and major parameters;
+- the integrated reduction names used for plots;
+- before and after plots colored by batch and biological labels;
+- marker-gene checks for expected cell types;
+- any method-specific dependencies or environment setup needed to reproduce the
+  run.
+
+Integration is a preprocessing decision, not a biological result by itself. Use
+it only when the integrated representation improves downstream interpretation
+without hiding real biological differences.

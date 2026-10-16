@@ -1,0 +1,233 @@
+# Workflow derived from https://github.com/r-lib/actions/tree/v2/examples
+# Need help debugging build failures? Start at https://github.com/r-lib/actions#where-to-find-help
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master, dev]
+
+name: R-CMD-check
+
+jobs:
+  R-CMD-check:
+    runs-on: ${{ matrix.config.os }}
+
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {os: macos-latest, r: 'release', check-args: 'c("--no-manual", "--as-cran", "--no-examples")'}
+          - {os: windows-latest, r: 'release', check-args: 'c("--no-manual", "--as-cran", "--no-examples")'}
+          - {os: ubuntu-latest, r: 'release', check-args: 'c("--no-manual", "--as-cran", "--no-examples")'}
+
+    env:
+      R_KEEP_PKG_SOURCE: yes
+      _R_CHECK_FORCE_SUGGESTS_: false
+      # Windows compiles 40+ C++ translation units; allow 20 minutes so
+      # install never fails on a slow runner.
+      _R_CHECK_INSTALL_ELAPSED_TIMEOUT_: 1200
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          use-public-rspm: true
+
+      - name: Capture R library path 🔍
+        id: r-info
+        shell: bash
+        run: |
+          echo "r-version=$(Rscript -e 'cat(as.character(getRversion()))')" >> "$GITHUB_OUTPUT"
+          echo "r-lib=$(Rscript -e 'cat(.libPaths()[1])')" >> "$GITHUB_OUTPUT"
+
+      # The cache key is decoupled from the dependency manifest: it pins
+      # OS + R version only, so DESCRIPTION bumps never force a full
+      # recompilation (Ubuntu used to rebuild ~80 bioinformatics packages
+      # from source, ~60 min).  setup-r-dependencies installs just the
+      # delta between the restored library and DESCRIPTION.
+      - name: Restore R package cache ♻️
+        id: r-pkg-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.r-info.outputs.r-lib }}
+          key: r-hard-v1-${{ runner.os }}-r${{ steps.r-info.outputs.r-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            r-hard-v1-${{ runner.os }}-r${{ steps.r-info.outputs.r-version }}-
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        env:
+          GITHUB_PAT: ${{ github.token }}
+        with:
+          extra-packages: any::rcmdcheck, any::testthat, any::callr, any::ps, github::immunogenomics/presto, bioc::speckle, bioc::glmGamPoi
+          needs: check
+          dependencies: '"hard"'
+          cache: false
+
+      - name: Verify speckle propeller backend
+        shell: Rscript {0}
+        run: |
+          stopifnot(requireNamespace("speckle", quietly = TRUE))
+          pkgload::load_all(".", quiet = TRUE)
+          for (path in c("tests/testthat/test-propeller-speckle.R",
+                         "tests/testthat/test-proportion-method-contracts.R")) {
+            desc <- if (grepl("method-contracts", path))
+              "virtual samples require opt-in and suppress inferential columns" else NULL
+            results <- testthat::test_file(path, desc = desc, reporter = "summary",
+                                          stop_on_failure = TRUE)
+            stopifnot(!any(as.data.frame(results)$skipped))
+          }
+
+      # Presto is deliberately runtime-optional and therefore is not exposed
+      # as a declared dependency inside R CMD check. Exercise the real GitHub
+      # installation here, before the check process narrows its library view.
+      - name: Verify runtime Presto backend 🧪
+        shell: Rscript {0}
+        run: |
+          pkgload::load_all(".", quiet = TRUE, compile = FALSE)
+          get_namespace_fun <- get("get_namespace_fun", asNamespace("scop"))
+          presto_fun <- get_namespace_fun("presto", "wilcoxauc")
+          stopifnot(is.function(presto_fun))
+          testthat::test_file(
+            "tests/testthat/test-presto-backend.R",
+            reporter = "summary",
+            stop_on_failure = TRUE
+          )
+          source_parity_tests <- list(
+            "tests/testthat/test-rundetest-findmarkers.R" = c(
+              "RunDEtest uses scop FindMarkers-compatible sparse Wilcoxon path",
+              "FindMarkers native branches exactly match the Seurat method",
+              "supported RunDEtest Wilcoxon branches stay on the scop backend",
+              "RunDEtest all-in-one markers match the pairwise scop backend"
+            ),
+            "tests/testthat/test-seurat-fast-paths.R" = c(
+              "FindAllMarkers supports feature subsets with Seurat parity",
+              "FindAllMarkers native path covers metadata groups and FC controls",
+              "FindAllMarkers accelerates Seurat-compatible sampling"
+            )
+          )
+          for (test_path in names(source_parity_tests)) {
+            for (test_description in source_parity_tests[[test_path]]) {
+              testthat::test_file(
+                test_path,
+                desc = test_description,
+                reporter = "summary",
+                stop_on_failure = TRUE
+              )
+            }
+          }
+
+      - name: Save R package cache 💾
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.r-info.outputs.r-lib }}
+          key: r-hard-v1-${{ runner.os }}-r${{ steps.r-info.outputs.r-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          args: ${{ matrix.config.check-args }}
+          build_args: '"--no-manual"'
+          error-on: '"error"'
+          upload-snapshots: true
+
+  suggests-contract:
+    runs-on: ubuntu-latest
+    name: ubuntu-latest (release, key Suggests)
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Capture R library path 🔍
+        id: r-info
+        shell: bash
+        run: |
+          echo "r-version=$(Rscript -e 'cat(as.character(getRversion()))')" >> "$GITHUB_OUTPUT"
+          echo "r-lib=$(Rscript -e 'cat(.libPaths()[1])')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore R package cache ♻️
+        id: r-pkg-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.r-info.outputs.r-lib }}
+          key: r-suggests-v1-${{ runner.os }}-r${{ steps.r-info.outputs.r-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            r-suggests-v1-${{ runner.os }}-r${{ steps.r-info.outputs.r-version }}-
+            r-hard-v1-${{ runner.os }}-r${{ steps.r-info.outputs.r-version }}-
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        env:
+          GITHUB_PAT: ${{ github.token }}
+        with:
+          extra-packages: |
+            any::testthat
+            any::pkgload
+            any::Seurat
+            bioc::GSVA
+            any::RcppML
+            bioc::Banksy
+            bioc::SpatialExperiment
+            bioc::BiocNeighbors
+          needs: check
+          dependencies: '"hard"'
+          cache: false
+
+      - name: Save R package cache 💾
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.r-info.outputs.r-lib }}
+          key: r-suggests-v1-${{ runner.os }}-r${{ steps.r-info.outputs.r-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Gene-set scoring contract tests 🧪
+        shell: Rscript {0}
+        run: |
+          testthat::test_local(
+            filter = "gene-set-scoring-cpp|gene-set-speed-consistency|run-nmf-rcppml-compat",
+            reporter = "summary",
+            load_package = "source",
+            stop_on_failure = TRUE
+          )
+
+      - name: BANKSY result and real backend contracts 🧪
+        shell: Rscript {0}
+        env:
+          NOT_CRAN: "true"
+        run: |
+          for (package in c("Banksy", "SpatialExperiment", "BiocNeighbors")) {
+            stopifnot(requireNamespace(package, quietly = TRUE))
+          }
+          pkgload::load_all(".", quiet = TRUE, compile = FALSE)
+          for (path in c("tests/testthat/test-banksy.R",
+                         "tests/testthat/test-banksy-multisample-backend.R")) {
+            results <- testthat::test_file(path, reporter = "summary",
+                                          stop_on_failure = TRUE)
+            results <- as.data.frame(results)
+            stopifnot(nrow(results) > 0L, !any(results$skipped))
+          }
+          results <- testthat::test_file(
+            "tests/testthat/test-spatial-original-consistency2.R",
+            desc = "RunBANKSY clusters match the original Banksy pipeline",
+            reporter = "summary", stop_on_failure = TRUE
+          )
+          results <- as.data.frame(results)
+          stopifnot(nrow(results) > 0L, !any(results$skipped))
+
+      - name: Spatial object alias contracts 🧪
+        shell: Rscript {0}
+        run: |
+          stopifnot(requireNamespace("BiocNeighbors", quietly = TRUE))
+          pkgload::load_all(".", quiet = TRUE, compile = FALSE)
+          results <- testthat::test_file(
+            "tests/testthat/test-spatial-object-alias.R",
+            reporter = "summary", stop_on_failure = TRUE
+          )
+          results <- as.data.frame(results)
+          stopifnot(nrow(results) > 0L, !any(results$skipped))

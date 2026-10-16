@@ -1,0 +1,326 @@
+make_spatial_gradient_seurat <- function() {
+  counts <- matrix(
+    c(
+      1, 0, 2, 3,
+      0, 4, 1, 0,
+      5, 1, 0, 2
+    ),
+    nrow = 3,
+    byrow = TRUE,
+    dimnames = list(paste0("Gene", 1:3), paste0("Spot", 1:4))
+  )
+  counts <- methods::as(Matrix::Matrix(counts, sparse = TRUE), "dgCMatrix")
+  srt <- Seurat::CreateSeuratObject(counts = counts)
+  srt$x <- c(1, 2, 1, 2)
+  srt$y <- c(1, 1, 2, 2)
+  srt
+}
+
+make_spatial_gradient_result <- function() {
+  list(
+    screening = data.frame(
+      variable = rep(c("Gene1", "Gene2"), each = 3),
+      distance = rep(c(0, 1, 2), times = 2),
+      value = c(1, 2, 3, 3, 2, 1),
+      estimate = c(1.1, 1.9, 3.1, 3.0, 2.1, 0.9),
+      reference = "trajectory",
+      mode = "trajectory",
+      stringsAsFactors = FALSE
+    ),
+    significance = data.frame(
+      variable = c("Gene1", "Gene2"),
+      tot_var = c(0.8, 0.7),
+      p_value = c(0.001, 0.01),
+      fdr = c(0.002, 0.02),
+      stringsAsFactors = FALSE
+    ),
+    model_fits = data.frame(
+      variable = c("Gene1", "Gene1", "Gene2"),
+      model = c("ascending", "descending", "descending"),
+      mae = c(0.1, 0.4, 0.2),
+      rmse = c(0.2, 0.5, 0.3),
+      r2 = c(0.95, 0.6, 0.9),
+      stringsAsFactors = FALSE
+    ),
+    top_variables = data.frame(
+      variable = c("Gene1", "Gene2"),
+      rank = c(1, 2),
+      fdr = c(0.002, 0.02),
+      best_model = c("ascending", "descending"),
+      mae = c(0.1, 0.2),
+      rmse = c(0.2, 0.3),
+      stringsAsFactors = FALSE
+    ),
+    parameters = data.frame(
+      key = c("reference", "assay", "seed"),
+      value = c("trajectory", "RNA", "123"),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+test_that("SPATA2 output tables are standardized to stable column names", {
+  significance <- sgf_standardize_significance(data.frame(
+    variables = "Gene1",
+    p.value = 0.01,
+    q_value = 0.02,
+    tot_var = 0.8
+  ))
+  expect_named(significance[1:4], c("variable", "tot_var", "p_value", "fdr"))
+  expect_equal(significance$variable, "Gene1")
+  expect_equal(significance$fdr, 0.02)
+
+  model_fits <- sgf_standardize_model_fits(data.frame(
+    genes = "Gene1",
+    models = "ascending",
+    mae = 0.1,
+    rmse = 0.2
+  ))
+  expect_named(model_fits[1:4], c("variable", "model", "mae", "rmse"))
+  expect_equal(model_fits$model, "ascending")
+
+  screening <- sgf_standardize_screening_df(data.frame(
+    feature = c("Gene1", "Gene1"),
+    dist = c(0, 1),
+    expr = c(1, 2),
+    fitted = c(1.1, 1.9)
+  ), reference = "trajectory")
+  expect_named(screening[1:6], c("variable", "distance", "value", "estimate", "reference", "mode"))
+  expect_equal(unique(screening$reference), "trajectory")
+})
+
+
+test_that("cpp backend coordinates prefer metadata coord.cols", {
+  srt <- make_spatial_gradient_seurat()
+  coords <- sgf_cpp_coords(srt, image = NULL, coord.cols = c("x", "y"))
+
+  expect_equal(rownames(coords), colnames(srt))
+  expect_equal(unname(coords$x), unname(srt$x))
+  expect_equal(unname(coords$y), unname(srt$y))
+})
+
+test_that("top variable table merges significance and best model fits deterministically", {
+  significance <- data.frame(
+    variable = c("Gene3", "Gene1", "Gene2"),
+    p_value = c(0.03, 0.001, 0.01),
+    fdr = c(0.06, 0.002, 0.02),
+    stringsAsFactors = FALSE
+  )
+  model_fits <- data.frame(
+    variable = c("Gene1", "Gene1", "Gene2"),
+    model = c("ascending", "descending", "descending"),
+    mae = c(0.1, 0.4, 0.2),
+    rmse = c(0.2, 0.5, 0.3),
+    stringsAsFactors = FALSE
+  )
+
+  top <- sgf_top_variables(
+    screening_out = list(),
+    significance = significance,
+    model_fits = model_fits,
+    nfeatures = 2,
+    sign_var = "fdr",
+    sign_threshold = 0.05
+  )
+
+  expect_equal(top$variable, c("Gene1", "Gene2"))
+  expect_equal(top$rank, c(1L, 2L))
+  expect_equal(top$best_model, c("ascending", "descending"))
+  expect_equal(top$rmse, c(0.2, 0.3))
+})
+
+test_that("spatial gradient storage keeps only plain data frames", {
+  srt <- make_spatial_gradient_seurat()
+  result <- make_spatial_gradient_result()
+
+  srt <- sgf_store_result(
+    srt = srt,
+    result_name = "mock",
+    result = result,
+    assay = "RNA"
+  )
+
+  stored <- srt@tools[["SpatialGradientFeatures"]][["mock"]]
+  table_names <- c("screening", "significance", "model_fits", "top_variables", "parameters")
+  expect_equal(names(stored), c(table_names, "source"))
+  expect_true(all(vapply(stored[table_names], is.data.frame, logical(1))))
+  expect_type(stored$source, "list")
+  expect_false(any(vapply(stored, methods::is, logical(1), class2 = "SPATA2")))
+  expect_equal(
+    srt@tools[["SpatialGradientFeatures"]]$summary$top_features,
+    c("Gene1", "Gene2")
+  )
+  expect_identical(srt@tools[["SpatialGradientFeatures"]]$summary$n_results, 1L)
+  expect_false("coordinate_contract_version" %in% names(
+    srt@tools[["SpatialGradientFeatures"]]
+  ))
+  expect_identical(sgf_get_result(srt, "mock"), stored)
+  expect_error(
+    sgf_get_result(srt, "coordinate_contract_version"),
+    "not present"
+  )
+})
+
+test_that("cpp backend stores annotation gradient result tables", {
+  srt <- make_spatial_gradient_seurat()
+  srt$source_score <- c(1, 0, 0, 0)
+
+  srt <- RunSpatialGradientFeatures(
+    srt,
+    reference = "annotation",
+    backend = "cpp",
+    result_name = "cpp_annotation",
+    set_variable_features = TRUE,
+    variables = c("Gene1", "Gene2"),
+    annotation.variable = "source_score",
+    annotation.threshold = 0,
+    layer = "counts",
+    coord.cols = c("x", "y"),
+    coordinate_space = "raw",
+    n_random = 0,
+    n_bins = 3,
+    min_spots = 1,
+    sign_threshold = 1,
+    nfeatures = 2,
+    verbose = FALSE
+  )
+
+  stored <- srt@tools[["SpatialGradientFeatures"]][["cpp_annotation"]]
+  table_names <- c("screening", "significance", "model_fits", "top_variables", "parameters")
+  expect_equal(names(stored), c(table_names, "source"))
+  expect_true(all(vapply(stored[table_names], is.data.frame, logical(1))))
+  expect_type(stored$source, "list")
+  expect_false(any(vapply(stored, methods::is, logical(1), class2 = "SPATA2")))
+  expect_true(nrow(stored$screening) > 0)
+  expect_true(nrow(stored$top_variables) > 0)
+  expect_identical(
+    SeuratObject::VariableFeatures(srt, assay = "RNA"),
+    unique(stored$top_variables$variable)
+  )
+  expect_equal(stored$parameters$value[match("backend", stored$parameters$key)], "cpp")
+  expect_false("spata2_version" %in% stored$parameters$key)
+  expect_true(all(c("norm_var", "rel_var", "linear_r2") %in% colnames(stored$significance)))
+  expect_true(all(c("ascending", "descending", "peak", "valley", "linear") %in% stored$model_fits$model))
+  expect_true(any(stored$significance$tot_var != stored$significance$linear_r2, na.rm = TRUE))
+  expect_identical(srt@tools$SpatialGradientFeatures$parameters$backend, "cpp")
+  expect_identical(
+    srt@tools$SpatialGradientFeatures$summary$active_result,
+    "cpp_annotation"
+  )
+})
+
+test_that("removed gradient compatibility arguments fail explicitly", {
+  srt <- make_spatial_gradient_seurat()
+
+  expect_error(
+    RunSpatialGradientFeatures(
+      srt,
+      reference = "annotation",
+      backend = "cpp",
+      variables = "Gene1",
+      annotation_ids = "legacy_annotation",
+      layer = "counts",
+      coord.cols = c("x", "y"),
+      n_random = 0,
+      n_bins = 3,
+      min_spots = 1,
+      verbose = FALSE
+    ),
+    "unused argument|annotation_ids"
+  )
+})
+
+test_that("cpp backend stores trajectory gradient result tables", {
+  srt <- make_spatial_gradient_seurat()
+
+  srt <- RunSpatialGradientFeatures(
+    srt,
+    reference = "trajectory",
+    backend = "cpp",
+    result_name = "cpp_trajectory",
+    variables = c("Gene1", "Gene2"),
+    start = c(1, 1),
+    end = c(2, 2),
+    unit = "micron",
+    layer = "counts",
+    coord.cols = c("x", "y"),
+    n_random = 0,
+    n_bins = 3,
+    min_spots = 1,
+    sign_threshold = 1,
+    nfeatures = 2,
+    verbose = FALSE
+  )
+
+  stored <- srt@tools[["SpatialGradientFeatures"]][["cpp_trajectory"]]
+  table_names <- c("screening", "significance", "model_fits", "top_variables", "parameters")
+  expect_true(all(vapply(stored[table_names], is.data.frame, logical(1))))
+  expect_identical(stored$source$units, "micron")
+  expect_identical(stored$source$coordinate_space, "raw")
+  expect_true(nrow(stored$significance) > 0)
+  expect_true(nrow(stored$model_fits) > 0)
+  expect_equal(unique(stored$screening$mode), "trajectory")
+  expect_false(any(c(
+    "trajectory_id", "annotation_id", "core", "distance", "angle_span"
+  ) %in% stored$parameters$key))
+  expect_identical(
+    srt@tools$SpatialGradientFeatures$summary$active_result,
+    "cpp_trajectory"
+  )
+})
+
+test_that("SpatialGradientPlot handles stored results and missing tables clearly", {
+  srt <- make_spatial_gradient_seurat()
+  result <- make_spatial_gradient_result()
+  srt <- sgf_store_result(srt, "mock", result, assay = "RNA")
+
+  expect_s3_class(
+    SpatialGradientPlot(srt, result_name = "mock", plot_type = "line", theme_use = NULL),
+    "ggplot"
+  )
+  p_line_lm <- SpatialGradientPlot(
+    srt,
+    result_name = "mock",
+    plot_type = "line",
+    line_fit = "lm",
+    theme_use = NULL
+  )
+  expect_s3_class(p_line_lm, "ggplot")
+  expect_s3_class(p_line_lm$layers[[2]]$geom, "GeomSmooth")
+  p_summary <- SpatialGradientPlot(
+    srt,
+    result_name = "mock",
+    plot_type = "summary",
+    theme_use = NULL
+  )
+  expect_s3_class(p_summary, "ggplot")
+  expect_identical(p_summary$labels$x, "RMSE")
+  expect_identical(p_summary$scales$get_scales("colour")$guide, "none")
+  p_model <- SpatialGradientPlot(
+    srt,
+    result_name = "mock",
+    plot_type = "model",
+    theme_use = NULL
+  )
+  expect_s3_class(p_model, "ggplot")
+  expect_error(
+    SpatialGradientPlot(srt, result_name = "mock", plot_type = "surface"),
+    "one of.*summary.*line.*model"
+  )
+  expect_s3_class(p_model$layers[[2]]$geom, "GeomText")
+  no_screening <- result
+  no_screening$screening <- data.frame()
+  srt <- sgf_store_result(srt, "no_screening", no_screening, assay = "RNA")
+  expect_error(
+    SpatialGradientPlot(srt, result_name = "no_screening", plot_type = "line", theme_use = NULL),
+    "screening data"
+  )
+
+  empty_top <- result
+  empty_top$top_variables <- empty_top$top_variables[0, , drop = FALSE]
+  srt <- sgf_store_result(srt, "empty_top", empty_top, assay = "RNA")
+  expect_error(
+    SpatialGradientPlot(srt, result_name = "empty_top", plot_type = "summary", theme_use = NULL),
+    "No top spatial gradient variables"
+  )
+})

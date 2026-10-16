@@ -1,0 +1,19 @@
+{
+  "input": "data/cells.h5ad",
+  "output": "results/metabolism",
+  "species": "human",
+  "methods": ["gsva", "scmetabolism", "vision", "scfea"],
+  "database": "KEGG",
+  "layer": "counts",
+  "gene_column": "gene_symbol",
+  "select": {"column": "cell_type", "values": ["CD8 T"]},
+  "group_by": ["donor_id", "condition"],
+  "sample_column": "donor_id",
+  "min_genes_per_set": 10,
+  "scfea_epochs": 100,
+  "r_seed": 16,
+  "cores": 1,
+  "rscript": "D:/WorkBuddy/env/R-4.6.1/bin/Rscript.exe",
+  "r_libs_user": "D:/WorkBuddy/env/Rlib-4.6",
+  "python": "D:/WorkBuddy/env/single_cell_metabolism_py312/Scripts/python.exe"
+}

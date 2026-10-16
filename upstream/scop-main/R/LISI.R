@@ -1,0 +1,257 @@
+#' @title Compute LISI scores on a Seurat object
+#'
+#' @description
+#' Compute per-cell Local Inverse Simpson's Index (LISI) scores from a
+#' dimensional reduction and store them in the `meta.data` and `tools` slots
+#' of a `Seurat` object.
+#'
+#' @md
+#' @inheritParams thisutils::log_message
+#' @inheritParams CellDimPlot
+#' @param srt Deprecated alias for `object`; supply exactly one of the two. It
+#' will be removed in scop 1.0.0.
+#' @param object A `Seurat` object.
+#' @param reductions Character vector of dimensional reductions used to compute LISI.
+#' If `NULL`, [DefaultReduction()] is used.
+#' @param reduction Deprecated alias of `reductions`.
+#' @param dims Dimensions to use from the reduction. Default is `NULL`,
+#' which uses all available dimensions.
+#' @param label_colnames Character vector of metadata columns used for LISI.
+#' If `NULL`, `RunLISI()` will try to use `srt@misc[["integration_batch"]]`.
+#' @param prefix Prefix used for the stored LISI metadata columns.
+#' If `NULL`, the reduction names are used.
+#' @param tool_name Name used to store detailed results in `srt@tools`.
+#' Default is `"LISI"` when multiple reductions are provided, otherwise
+#' `paste0(prefix, "_LISI")`.
+#' @param perplexity Effective neighborhood size.
+#' @param tol Tolerance used in the binary search for the target perplexity.
+#' @param max_iter Maximum number of binary-search iterations.
+#' @param knn_algorithm Exact nearest-neighbor strategy passed to
+#' [thisutils::compute_lisi()].
+#' @param cores Number of LISI C++ worker threads. `NULL` (the default) lets
+#' [thisutils::compute_lisi()] select the available hardware threads.
+#' @param max_dense_bytes Maximum estimated bytes allowed for LISI's dense
+#' input and C++ copy. Default is `Inf`, which preserves unrestricted behavior.
+#' @param overwrite Whether to overwrite existing metadata columns.
+#'
+#' @return A modified `Seurat` object.
+#' @export
+#'
+#' @seealso
+#' [thisutils::compute_lisi], [IntegrationBenchmarkPlot], [RunIntegrationBenchmark]
+#'
+#' @examples
+#' data(panc8_sub)
+#' set.seed(1)
+#' demo_embedding <- matrix(
+#'   stats::rnorm(ncol(panc8_sub) * 5),
+#'   nrow = ncol(panc8_sub),
+#'   dimnames = list(colnames(panc8_sub), paste0("DEMO_", 1:5))
+#' )
+#' panc8_sub[["demo"]] <- SeuratObject::CreateDimReducObject(
+#'   embeddings = demo_embedding,
+#'   key = "DEMO_",
+#'   assay = SeuratObject::DefaultAssay(panc8_sub)
+#' )
+#' names(panc8_sub@reductions)
+#'
+#' panc8_sub <- RunLISI(
+#'   panc8_sub,
+#'   reductions = "demo",
+#'   label_colnames = "tech",
+#'   perplexity = 10
+#' )
+#' IntegrationBenchmarkPlot(panc8_sub, plot_type = "box")
+RunLISI <- function(
+  object,
+  reductions = NULL,
+  reduction = NULL,
+  dims = NULL,
+  label_colnames = NULL,
+  prefix = NULL,
+  tool_name = NULL,
+  perplexity = 30,
+  tol = 1e-05,
+  max_iter = 50,
+  knn_algorithm = c("auto", "brute_force", "clustered"),
+  cores = NULL,
+  max_dense_bytes = Inf,
+  overwrite = TRUE,
+  verbose = TRUE,
+  srt = NULL
+) {
+  srt <- resolve_deprecated_srt(object, srt, missing(object))
+  if (!inherits(srt, "Seurat")) {
+    log_message(
+      "{.arg srt} must be a {.cls Seurat}",
+      message_type = "error"
+    )
+  }
+
+  reductions <- reductions %||% reduction %||% DefaultReduction(srt)
+  reductions <- unique(as.character(reductions))
+  missing_reductions <- setdiff(reductions, SeuratObject::Reductions(srt))
+  if (length(missing_reductions) > 0) {
+    log_message(
+      "Reductions not found in {.cls Seurat}: {.val {missing_reductions}}",
+      message_type = "error"
+    )
+  }
+
+  if (is.null(label_colnames)) {
+    label_colnames <- srt@misc[["integration_batch"]] %||% NULL
+  }
+  if (is.null(label_colnames) || length(label_colnames) == 0) {
+    log_message(
+      "{.arg label_colnames} must contain at least one metadata column, or {.val integration_batch} must be stored in {.arg srt@misc}. Objects returned by {.fn RunIntegration} store this automatically.",
+      message_type = "error"
+    )
+  }
+
+  if (!all(label_colnames %in% colnames(srt@meta.data))) {
+    missing_cols <- setdiff(label_colnames, colnames(srt@meta.data))
+    log_message(
+      "The following metadata columns are missing: {.val {missing_cols}}",
+      message_type = "error"
+    )
+  }
+  knn_algorithm <- match.arg(knn_algorithm)
+  if (
+    !is.null(cores) && (
+      length(cores) != 1L || !is.numeric(cores) ||
+        is.na(cores) || !is.finite(cores) || cores < 1 ||
+        cores > .Machine$integer.max || cores != floor(cores)
+    )
+  ) {
+    log_message(
+      "{.arg cores} must be NULL or a single positive integer",
+      message_type = "error"
+    )
+  }
+  if (!is.null(cores)) {
+    cores <- as.integer(cores)
+  }
+  if (
+    length(max_dense_bytes) != 1L || !is.numeric(max_dense_bytes) ||
+      is.na(max_dense_bytes) || max_dense_bytes < 0 ||
+      (!is.finite(max_dense_bytes) && !identical(max_dense_bytes, Inf))
+  ) {
+    log_message(
+      "{.arg max_dense_bytes} must be a single non-negative number or {.val Inf}",
+      message_type = "error"
+    )
+  }
+  if (is.null(prefix)) {
+    prefix <- reductions
+  }
+  if (length(prefix) == 1 && length(reductions) > 1) {
+    prefix <- rep(prefix, length(reductions))
+  }
+  if (length(prefix) != length(reductions)) {
+    log_message(
+      "{.arg prefix} must have length 1 or the same length as {.arg reductions}",
+      message_type = "error"
+    )
+  }
+  tool_name <- tool_name %||%
+    if (length(reductions) > 1) {
+      "LISI"
+    } else {
+      paste0(prefix[[1]], "_LISI")
+    }
+
+  lisi_df_all <- list()
+  lisi_cols_all <- character(0)
+  dims_all <- list()
+  estimated_dense_bytes_all <- list()
+  for (i in seq_along(reductions)) {
+    reduction_i <- reductions[[i]]
+    prefix_i <- prefix[[i]] %||% reduction_i
+    if (!nzchar(prefix_i)) {
+      prefix_i <- reduction_i
+    }
+
+    emb <- Seurat::Embeddings(srt, reduction = reduction_i)
+    dims_i <- dims
+    if (is.null(dims_i)) {
+      dims_i <- seq_len(ncol(emb))
+    }
+    dims_i <- unique(as.integer(dims_i))
+    if (anyNA(dims_i) || any(dims_i < 1) || any(dims_i > ncol(emb))) {
+      log_message(
+        "{.arg dims} must be within the available dimensions of {.val {reduction_i}}",
+        message_type = "error"
+      )
+    }
+
+    lisi_cols <- make.names(
+      paste0(prefix_i, "_", label_colnames, "_LISI"),
+      unique = TRUE
+    )
+    if (!isTRUE(overwrite) && any(lisi_cols %in% colnames(srt@meta.data))) {
+      existing_cols <- intersect(lisi_cols, colnames(srt@meta.data))
+      log_message(
+        "Metadata columns already exist: {.val {existing_cols}}. Set {.arg overwrite = TRUE} to replace them.",
+        message_type = "error"
+      )
+    }
+
+    log_message(
+      "Compute {.pkg LISI} scores from reduction {.val {reduction_i}}",
+      verbose = verbose
+    )
+    embedding_i <- emb[, dims_i, drop = FALSE]
+    estimated_dense_bytes <-
+      as.double(nrow(embedding_i)) * as.double(ncol(embedding_i)) * 8 * 2
+    if (estimated_dense_bytes > max_dense_bytes) {
+      log_message(
+        "Estimated dense {.pkg LISI} input and copy require {.val {format(estimated_dense_bytes, scientific = FALSE)}} bytes, which exceeds {.arg max_dense_bytes} ({.val {format(max_dense_bytes, scientific = FALSE)}} bytes)",
+        message_type = "error"
+      )
+    }
+    lisi_df <- thisutils::compute_lisi(
+      X = embedding_i,
+      meta_data = srt@meta.data,
+      label_colnames = label_colnames,
+      perplexity = perplexity,
+      tol = tol,
+      max_iter = max_iter,
+      knn_algorithm = knn_algorithm,
+      n_threads = cores,
+      max_dense_bytes = max_dense_bytes
+    )
+    colnames(lisi_df) <- lisi_cols
+    lisi_df <- lisi_df[colnames(srt), , drop = FALSE]
+
+    srt@meta.data[, lisi_cols] <- lisi_df
+    lisi_df_all[[reduction_i]] <- lisi_df
+    lisi_cols_all <- c(lisi_cols_all, lisi_cols)
+    dims_all[[reduction_i]] <- dims_i
+    estimated_dense_bytes_all[[reduction_i]] <- estimated_dense_bytes
+  }
+
+  lisi_scores <- do.call(cbind, lisi_df_all)
+  srt@tools[[tool_name]] <- list(
+    scores = lisi_scores,
+    reductions = reductions,
+    reduction = if (length(reductions) == 1) reductions[[1]] else reductions,
+    dims = dims_all,
+    label_colnames = label_colnames,
+    colnames = lisi_cols_all,
+    perplexity = perplexity,
+    tol = tol,
+    max_iter = max_iter,
+    knn_algorithm = knn_algorithm,
+    cores = cores,
+    max_dense_bytes = max_dense_bytes,
+    estimated_dense_bytes = estimated_dense_bytes_all
+  )
+
+  log_message(
+    "Stored {.pkg LISI} scores in metadata: {.val {lisi_cols_all}}",
+    message_type = "success",
+    text_color = "green",
+    verbose = verbose
+  )
+  srt
+}
